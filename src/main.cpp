@@ -47,24 +47,18 @@ Params parseArgs(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         std::string cur = argv[i];
 
-        if (cur == "-f" || cur == "-s" || cur == "-C" || cur == "-t" ||
-            cur == "-h" || cur == "-o") {
-            if (i + 1 >= argc) {
-                std::cerr << "Argumento ausente para " << cur << "\n";
-                std::exit(1);
-            }
-
-            const std::string param_value = argv[++i];
-            if      (cur == "-f") p.input_file = param_value;
-            else if (cur == "-s") p.depot = std::stoi(param_value);
-            else if (cur == "-C") p.capacity = std::stoi(param_value);
-            else if (cur == "-t") p.time_limit = std::stod(param_value);
-            else if (cur == "-h") p.heuristic_time = std::stod(param_value);
-            else if (cur == "-o") p.output_file = param_value;
-        } else {
-            std::cerr << "Opção desconhecida: " << cur << "\n";
-            std::exit(1);
-        }
+        auto next = [&]() -> std::string {
+            if (i + 1 >= argc) { std::cerr << "Argumento ausente para " << cur << "\n"; std::exit(1); }
+            return argv[++i];
+        };
+        
+        if      (cur == "-f") p.input_file = next();
+        else if (cur == "-s") p.depot = std::stoi(next());
+        else if (cur == "-C") p.capacity = std::stoi(next());
+        else if (cur == "-t") p.time_limit = std::stod(next());
+        else if (cur == "-h") p.heuristic_time = std::stod(next());
+        else if (cur == "-o") p.output_file = next();
+        else { std::cerr << "Parametro desconhecida: " << cur << "\n"; std::exit(1); }
     }
 
     if (p.input_file.empty() || p.output_file.empty()) {
