@@ -1,4 +1,5 @@
 # Prompt 1:
+Modelo: Gemini
 Data: 29/10/2026
 
 ## Prompt
