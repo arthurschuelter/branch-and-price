@@ -1,23 +1,31 @@
 # TODO
 
-## Instância e parser
+## Instância, parser e avaliação de rota
 
 - [x] Seguir o formato da Seção 10.2 do `enunciado.pdf`.
-- [x] Ler comentários iniciados por `#`.
+- [x] Ignorar comentários iniciados por `#`.
 - [x] Ler prioridades por dia, custos de deslocamento `c(i,j)` e conflitos.
-- [x] Validar quantidade de campos, índices, custos, conflitos e conteúdo extra.
-- [x] Converter `tests/instance_zero.txt` para o exemplo oficial da Seção 8.
-- [ ] Conferir a execução do parser com `tests/instance_zero.txt` (`-s 0 -C 10`).
+- [x] Validar campos, índices, custos, conflitos e conteúdo extra.
+- [x] Usar o exemplo oficial da Seção 8 em `tests/instance_zero.txt`.
+- [x] Executar o parser e conferir `evaluateRoute` com o exemplo oficial.
+- [x] Validar dia, sequência de clientes, capacidade e conflitos em `evaluateRoute`.
+- [x] Calcular custo logístico pela matriz `c` na ordem da rota, incluindo ida e volta ao depósito.
+- [x] Somar as prioridades do dia e preencher `RouteEvaluation`.
 
-## Próximo passo: avaliar uma sequência de rota
+## Próximo passo: inicializar o nó raiz (`initRoot`)
 
-`Instance::evaluateRoute(route, day)` recebe uma sequência ordenada de clientes (sem o depósito). Ao completar o método:
+- [ ] Para cada cliente `i` e dia `d`, criar uma coluna unitária com `route = {i}`.
+- [ ] Preencher `has` para indicar o cliente presente na coluna.
+- [ ] Obter `Column.cost` com `evaluateRoute({i}, d).total_cost`.
+- [ ] Adicionar as colunas ao pool global `pool_`.
+- [ ] Criar o nó raiz (`id = 0`, `depth = 0`, sem decisões e `lb = -inf`).
+- [ ] Colocar o nó raiz em `open_`.
+- [ ] Conferir que o exemplo oficial gera 36 colunas unitárias (6 clientes × 6 dias).
 
-- [ ] Validar o dia entre `1` e `n - 1`, a rota não vazia, os índices, a ausência de repetição e a ausência do depósito.
-- [ ] Somar os pesos da sequência e rejeitar capacidade excedida.
-- [ ] Rejeitar pares de clientes que aparecem no grafo de conflitos.
-- [ ] Calcular o deslocamento somando a matriz `c` na ordem recebida, do depósito à rota e de volta.
-- [ ] Calcular a prioridade somando `pi(i, day)` de cada cliente.
-- [ ] Preencher `RouteEvaluation`; para rota inválida, manter `valid == false`.
+## Depois: mestre restrito na raiz
 
-Não calcular custos por Manhattan nem permutar a sequência: as coordenadas são apenas para visualização, e a ordem faz parte da definição da rota.
+- [ ] Implementar o `RMPSolver` como LP: cada cliente deve ser atendido exatamente uma vez e cada dia pode ter no máximo uma rota.
+- [ ] Montar o PMR da raiz com as colunas iniciais e resolver o LP.
+- [ ] Extrair os duais dos clientes e dos dias.
+- [ ] Implementar pricing heurístico seguido de pricing exato quando a heurística não encontrar coluna de custo reduzido negativo.
+- [ ] Repetir o ciclo até o pricing exato provar que não há coluna com custo reduzido negativo; então registrar o limite inferior da raiz.

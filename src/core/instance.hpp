@@ -22,6 +22,8 @@ struct RouteEvaluation {
     int logistics_cost = 0;
     int priority_cost = 0;
     int total_cost = 0;
+
+    void printResult() const;
 };
 
 class Instance {

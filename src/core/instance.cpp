@@ -135,7 +135,7 @@ Instance Instance::read(const std::string& path, int depot, int capacity) {
                                  ": conteúdo extra após as arestas de conflito.");
     }
 
-    instance.printInstance();
+    // instance.printInstance();
     return instance;
 }
 
@@ -146,37 +146,49 @@ bool Instance::areInConflict(int i, int j) const {
 
 RouteEvaluation Instance::evaluateRoute(const std::vector<int>& route, int day) const {
     RouteEvaluation result;
-    // TODO: validar dia, índices de clientes, clientes repetidos e rota vazia.
+    if (route.empty() || day < 1 || day >= vertexCount()) return result;
 
-    // TODO: somar os pesos em result.load e verificar capacidade.
-    for (int u = 0; u < static_cast<int>(route.size()); ++u) {
-        Vertex v = this->vertices[route[u]];
-        int next_node = (u+1) % route.size();
-        int curr_node = u;
-        result.load += v.weight;
-
-        if (result.load > this->capacity) {
-            result.valid = false;
+    std::vector<bool> seen(vertices.size(), false);
+    for (int customer : route) {
+        if (customer < 0 || customer >= vertexCount() || customer == depot) return result;
+        if (seen[customer]) return result;
+        if (static_cast<int>(vertices[customer].priorities.size()) < day) {
             return result;
         }
-
-        result.logistics_cost += this->travel_costs[curr_node][next_node];
-        result.priority_cost += this->vertices[route[u]].priorities[day - 1];
+        seen[customer] = true;
+        result.load += vertices[customer].weight;
     }
 
-    // TODO: rejeitar a rota se algum par de clientes estiver em conflito.
-    for (int u = 0; u < static_cast<int>(route.size()); ++u) {
-        for (int v = 0; v < static_cast<int>(route.size()); ++v) {
-        if (this->areInConflict(route[u], route[v])) {
-                result.valid = false;
-                return result;
-            }
+    if (result.load > capacity) return result;
+
+    for (std::size_t u = 0; u < route.size(); ++u) {
+        for (std::size_t v = u + 1; v < route.size(); ++v) {
+            if (areInConflict(route[u], route[v])) return result;
         }
     }
-    // TODO: calcular a prioridade como soma(vertices[i].priority * day).
-    // TODO: preencher result.valid e result.total_cost.
+
+    int previous = depot;
+    for (int customer : route) {
+        result.logistics_cost += travel_costs[previous][customer];
+        result.priority_cost += vertices[customer].priorities[day - 1];
+        previous = customer;
+    }
+    result.logistics_cost += travel_costs[previous][depot];
+    result.total_cost = result.logistics_cost + result.priority_cost;
     result.valid = true;
     return result;
+}
+
+void RouteEvaluation::printResult() const {
+    if (!valid) {
+        std::cout << "inválida\n";
+        return;
+    }
+
+    std::cout << "Válida; Carga=" << load
+              << ", Viagem=" << logistics_cost
+              << ", Prioridade=" << priority_cost
+              << ", Total=" << total_cost << '\n';
 }
 
 void Instance::printInstance() {

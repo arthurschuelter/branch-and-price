@@ -27,11 +27,17 @@ int main(int argc, char** argv) {
         throw std::runtime_error("Falha ao ler arquivo");
     }
 
-    std::cout << "Instância lida: " << instance.vertexCount() << " vértices, "
-              << instance.conflictsCount() << " conflitos.\n";
+    // std::cout << "Instância lida: " << instance.vertexCount() << " vértices, "
+    //           << instance.conflictsCount() << " conflitos.\n";
 
-    instance.evaluateRoute({2, 3, 4}, 1);
-    instance.evaluateRoute({1, 2}, 1);
+    const RouteEvaluation valid_route = instance.evaluateRoute({1, 3}, 1);
+    std::cout << "Rota (1, 3), dia 1: ";
+    valid_route.printResult();
+
+    const RouteEvaluation invalid_route = instance.evaluateRoute({1, 2}, 1);
+    std::cout << "Rota (1, 2), dia 1: ";
+    invalid_route.printResult();
+    
     Config cfg = {
         p.time_limit,
         p.heuristic_time,
