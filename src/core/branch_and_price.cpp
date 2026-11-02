@@ -50,9 +50,29 @@ Solution BranchAndPrice::solve() {
 // Raiz
 // ---------------------------------------------------------------
 void BranchAndPrice::initRoot() {
-    // TODO: colunas unitárias (i, d) para todo i e todo d  -> pool_
-    // TODO: (EXP2) pré-processamento, se ativado
-    // TODO: criar Node raiz (decisions vazio, lb = -inf) e pushNode
+    // TODO: criar uma coluna unitária para cada cliente e cada dia.
+    for (int customer = 0; customer < inst_.vertexCount(); ++customer) {
+        // TODO: ignorar o depósito (inst_.depot).
+
+        for (int day = 1; day < inst_.vertexCount(); ++day) {
+            Column column{};
+
+            // TODO: definir column.route como a rota que contém apenas customer.
+            // TODO: inicializar column.has com vertexCount() posições e marcar customer.
+            // TODO: definir column.day.
+
+            // TODO: avaliar a rota com inst_.evaluateRoute(column.route, day).
+            // TODO: tratar o caso em que a rota unitária não seja válida.
+            // TODO: copiar o custo total da avaliação para column.cost.
+
+            // TODO: adicionar a coluna inicial ao pool_ (sem duplicá-la).
+        }
+    }
+
+    // TODO (EXP2): aplicar o pré-processamento, se estiver ativado.
+
+    // TODO: criar o nó raiz com id 0, profundidade 0, sem decisões e LB inicial.
+    // TODO: inserir o nó raiz em open_ usando pushNode().
 }
 
 // ---------------------------------------------------------------
