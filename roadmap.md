@@ -41,14 +41,14 @@ Este roadmap foi desenhado para guiar o desenvolvimento do projeto prático indi
 ### 0.1 Formulação Matemática
 
 #### Problema Mestre Restrito (PMR)
-Seja $\Omega$ o conjunto de todas as rotas válidas $R \subset V \setminus \{s\}$ que respeitam a capacidade $w(R) \le C$ e não possuem arestas do grafo de conflitos $G=(V,E)$.  
+Seja $\Omega$ o conjunto de todas as sequências de clientes distintos que não contêm o depósito e respeitam a capacidade $w(R) \le C$ e o grafo de conflitos $G=(V,E)$. A ordem dos clientes faz parte da rota.  
 Seja $d \in \{1, \dots, n-1\}$ o dia de execução da rota.
 
 Variável de decisão binária:  
 $$x_{R,d} = \begin{cases} 1, & \text{se a rota } R \text{ for executada no dia } d \\ 0, & \text{caso contrário} \end{cases}$$
 
 Parâmetros:
-- $\rho(R)$: Custo logístico do Caixeiro Viajante (TSP) no conjunto $R \cup \{s\}$.
+- Para $R=(i_1,\ldots,i_m)$, $\rho(R)=c(s,i_1)+\sum_{k=2}^{m}c(i_{k-1},i_k)+c(i_m,s)$, usando a matriz de custos de deslocamento da instância. A ordem já está especificada em $R$.
 - $\pi(R,d) = \sum_{i \in R} \pi(i,d)$: Custo de prioridade da rota $R$ no dia $d$.
 - $c_{R,d} = \rho(R) + \pi(R,d)$: Custo total da rota $R$ no dia $d$.
 
@@ -116,7 +116,21 @@ O programa principal em C++ deve aceitar rigorosamente os seguintes parâmetros 
 - `-h <segundos>`: Tempo adicional opcional para a heurística de arredondamento.
 - `-o <arquivo>`: Arquivo de saída com a solução e o limitante inferior.
 
-### 1.3 Verificador Independente e Enumeração Completa
+### 1.3 Formato Oficial da Instância
+
+O arquivo de entrada segue a Seção 10.2 do `enunciado.pdf`; comentários em linhas iniciadas por `#` são ignorados:
+
+1. `n m`: número de vértices e número de arestas de conflito.
+2. `n` linhas, uma por vértice `i`: `w_i x_i y_i pi(i,1) ... pi(i,n-1)`. As coordenadas são apenas para visualização; os custos de prioridade são fornecidos para cada dia.
+3. `n(n-1)/2` linhas `i j c(i,j)`, uma para cada par `0 <= i < j < n`. Os custos são simétricos; a diagonal é zero.
+4. `m` linhas `i j` com as arestas do grafo de conflitos.
+
+O depósito é informado por `-s`, a capacidade por `-C`. `tests/instance_zero.txt` deve permanecer como o exemplo oficial da Seção 8, cujo ótimo é 59.
+
+As coordenadas não determinam `c(i,j)`. A distância de Manhattan e a fórmula $\pi(i,d)=a_i d$ valem para o exemplo da Seção 8; instâncias gerais fornecem a matriz de custos e a tabela de prioridades explicitamente.
+No projeto, os custos de prioridade dos clientes devem ser não decrescentes ao longo dos dias (hipótese do enunciado na Seção 11).
+
+### 1.4 Verificador Independente e Enumeração Completa
 - [ ] **Verificador (`verificador.cpp`):**
   - Lê o arquivo de entrada e o de saída.
   - Valida partição de clientes, capacidade $w(R) \le C$, ausência de arestas de conflito em cada rota e recálculo exato dos custos $\rho(R)$ e $\pi(R,d)$.

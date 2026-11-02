@@ -4,6 +4,7 @@
 #include <memory>
 #include <chrono>
 #include <string>
+#include "instance.hpp"
 
 struct Column {
     std::vector<int> route;   // ordem de visita (sem o depósito) -> útil p/ saída

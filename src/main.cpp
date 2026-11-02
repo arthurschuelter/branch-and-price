@@ -1,5 +1,7 @@
 #include <cstdlib>
+#include <exception>
 #include <iostream>
+#include <stdexcept>
 #include "core/branch_and_price.hpp"
 #include "core/instance.hpp"
 
@@ -8,7 +10,7 @@ struct Params {
     int depot = 0;              // -s
     int capacity = 0;           // -C
     double time_limit = 0 ;     // -t
-    double heuristic_time = 0;       // -h
+    double heuristic_time = 0;  // -h
     std::string output_file;    // -o
 };
 
@@ -16,14 +18,31 @@ Params parseArgs(int argc, char** argv);
 
 int main(int argc, char** argv) {
     Params p = parseArgs(argc, argv);
+    Instance instance;
 
-    // TODO: implementar o parser de Instance a partir de p.input_file,
-    // validando vertices, pesos, coeficientes de prioridade e pares de conflito.
-    Instance instance = Instance::read(p.input_file, p.depot, p.capacity);
+    try {
+        instance = Instance::read(p.input_file, p.depot, p.capacity);
+    }
+    catch (std::runtime_error){
+        throw std::runtime_error("Falha ao ler arquivo");
+    }
+
+    std::cout << "Instância lida: " << instance.vertexCount() << " vértices, "
+              << instance.conflictsCount() << " conflitos.\n";
+
+    instance.evaluateRoute({2, 3, 4}, 1);
+    instance.evaluateRoute({1, 2}, 1);
+    Config cfg = {
+        p.time_limit,
+        p.heuristic_time,
+        SearchStrategy::DFS,
+        true,
+        true,
+        0
+    };
     
     // TODO: flags extras p/ ablações (--no-heur-pricing, --dfs, --bestbound, ...)
-    // TODO: Instance inst = Instance::read(p.input_file, p.depot, p.capacity);
-    // TODO: BranchAndPrice bp(inst, cfg);
+    // TODO: BranchAndPrice bp(instance, cfg);
     // TODO: Solution sol = bp.solve();
 
     // TODO: escrever sol + bp.lowerBound() em 'out' no formato do enunciado
@@ -41,7 +60,7 @@ Params parseArgs(int argc, char** argv) {
             if (i + 1 >= argc) { std::cerr << "Argumento ausente para " << cur << "\n"; std::exit(1); }
             return argv[++i];
         };
-        
+
         if      (cur == "-f") p.input_file = next();
         else if (cur == "-s") p.depot = std::stoi(next());
         else if (cur == "-C") p.capacity = std::stoi(next());

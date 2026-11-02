@@ -1,10 +1,38 @@
-7 2
-0 0 0 0
-2 1 4 3
-3 3 3 1
--2 2 5 2
--3 -1 2 5
-1 -3 6 1
-4 -2 3 4
+# Exemplo oficial da Seção 8; usar -s 0 -C 10.
+# n vértices e m arestas de conflito
+7 4
+# Para cada vértice: peso, x, y, prioridades nos dias 1 a 6
+0 0 0 0 0 0 0 0 0
+4 2 0 5 10 15 20 25 30
+3 4 0 1 2 3 4 5 6
+5 0 3 4 8 12 16 20 24
+2 0 5 1 2 3 4 5 6
+6 -3 0 2 4 6 8 10 12
+3 -3 -2 1 2 3 4 5 6
+# Custos de deslocamento c(i,j), para cada par i < j
+0 1 2
+0 2 4
+0 3 3
+0 4 5
+0 5 3
+0 6 5
+1 2 2
+1 3 5
+1 4 7
+1 5 5
+1 6 7
+2 3 7
+2 4 9
+2 5 7
+2 6 9
+3 4 2
+3 5 6
+3 6 8
+4 5 8
+4 6 10
+5 6 2
+# Arestas do grafo de conflitos
 1 2
+3 4
 3 5
+1 6
