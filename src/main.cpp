@@ -1,8 +1,7 @@
 #include <cstdlib>
 #include <iostream>
-#include <unistd.h>
 #include "core/branch_and_price.hpp"
-// #include "instance.hpp"
+#include "core/instance.hpp"
 
 struct Params {
     std::string input_file;     // -f
@@ -17,22 +16,13 @@ Params parseArgs(int argc, char** argv);
 
 int main(int argc, char** argv) {
     Params p = parseArgs(argc, argv);
-    std::cout << "Parsing: OK\n";
 
-
-    Config cfg{};
-    std::string file = p.input_file;
-    std::string out = p.output_file;
-    int depot = p.depot;
-    int capacity = p.capacity;
-    cfg.time_limit = p.time_limit;
-    cfg.heuristic_time = p.heuristic_time;
-
-    // TODO: parsing: -f -s -C -t -h -o   (cuidado: -h conflita com ajuda no getopt)
+    // TODO: implementar o parser de Instance a partir de p.input_file,
+    // validando vertices, pesos, coeficientes de prioridade e pares de conflito.
+    Instance instance = Instance::read(p.input_file, p.depot, p.capacity);
+    
     // TODO: flags extras p/ ablações (--no-heur-pricing, --dfs, --bestbound, ...)
-
-    // TODO: Instance inst = Instance::read(file, depot, capacity);
-
+    // TODO: Instance inst = Instance::read(p.input_file, p.depot, p.capacity);
     // TODO: BranchAndPrice bp(inst, cfg);
     // TODO: Solution sol = bp.solve();
 

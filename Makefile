@@ -19,6 +19,7 @@ configure:
 
 run: all
 	@mkdir -p $(dir $(O))
+	clear
 	./$(BUILD_DIR)/bp -f $(F) -s $(S) -C $(C) -t $(T) -h $(H) -o $(O)
 
 debug:

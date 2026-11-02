@@ -7,6 +7,7 @@ option(ENABLE_GUROBI "Build with Gurobi support" OFF)
 add_executable(bp
     src/main.cpp
     src/core/branch_and_price.cpp
+    src/core/instance.cpp
 )
 
 target_compile_features(bp PRIVATE cxx_std_17)
