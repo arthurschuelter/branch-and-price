@@ -58,15 +58,12 @@ void BranchAndPrice::initRoot() {
     this->open_.clear();
 
     for (int customer = 0; customer < inst_.vertexCount(); ++customer) {
-        if (inst_.depot == customer) {
-            std::cout << "Skipping" << std::endl;
-            continue;
-        }
+        if (inst_.depot == customer) continue;
 
         for (int day = 1; day < inst_.vertexCount(); ++day) {
             Column column{};
 
-            column.route = std::vector<int>{customer};
+            column.route.push_back(customer);
 
             column.has = std::vector<bool>(inst_.vertexCount(), false);
             column.has[customer] = true;
@@ -74,7 +71,6 @@ void BranchAndPrice::initRoot() {
             column.day = day;
 
             RouteEvaluation route = inst_.evaluateRoute(column.route, column.day);
-
             if (!route.valid) continue;
 
             column.cost = route.total_cost;
@@ -87,16 +83,12 @@ void BranchAndPrice::initRoot() {
         // TODO: Implementar pré-processamento.
     }
 
-    // TODO: criar o nó raiz com id 0, profundidade 0, sem decisões e LB inicial.
-    // std::unique_ptr<Node> ??
     auto root = std::make_unique<Node>();
     root->id = 0;
     root->depth = 0;
-    root->lb = -std::numeric_limits<double>::infinity();
+    root->lb = -std::numeric_limits<double>::infinity()/2;
     
-    // TODO: inserir o nó raiz em open_ usando pushNode().
     this->pushNode(std::move(root));
-    // this->open_.push_back(root);
 }
 
 // ---------------------------------------------------------------
