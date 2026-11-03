@@ -5,8 +5,12 @@
 
 BranchAndPrice::BranchAndPrice(const Instance& inst, const Config& cfg)
     : inst_(inst), cfg_(cfg) {
+        this->pool_ = std::vector<Column>();
+        this->open_ = std::deque<std::unique_ptr<Node>>();
     // TODO: criar rmp_ e pricer_
 }
+
+BranchAndPrice::~BranchAndPrice() = default;
 
 // ---------------------------------------------------------------
 // Laço principal
@@ -50,29 +54,49 @@ Solution BranchAndPrice::solve() {
 // Raiz
 // ---------------------------------------------------------------
 void BranchAndPrice::initRoot() {
-    // TODO: criar uma coluna unitária para cada cliente e cada dia.
+    this->pool_.clear();
+    this->open_.clear();
+
     for (int customer = 0; customer < inst_.vertexCount(); ++customer) {
-        // TODO: ignorar o depósito (inst_.depot).
+        if (inst_.depot == customer) {
+            std::cout << "Skipping" << std::endl;
+            continue;
+        }
 
         for (int day = 1; day < inst_.vertexCount(); ++day) {
             Column column{};
 
-            // TODO: definir column.route como a rota que contém apenas customer.
-            // TODO: inicializar column.has com vertexCount() posições e marcar customer.
-            // TODO: definir column.day.
+            column.route = std::vector<int>{customer};
 
-            // TODO: avaliar a rota com inst_.evaluateRoute(column.route, day).
-            // TODO: tratar o caso em que a rota unitária não seja válida.
-            // TODO: copiar o custo total da avaliação para column.cost.
+            column.has = std::vector<bool>(inst_.vertexCount(), false);
+            column.has[customer] = true;
 
-            // TODO: adicionar a coluna inicial ao pool_ (sem duplicá-la).
+            column.day = day;
+
+            RouteEvaluation route = inst_.evaluateRoute(column.route, column.day);
+
+            if (!route.valid) continue;
+
+            column.cost = route.total_cost;
+
+            this->pool_.push_back(column);
         }
     }
 
-    // TODO (EXP2): aplicar o pré-processamento, se estiver ativado.
+    if (this->cfg_.use_preprocessing) {
+        // TODO: Implementar pré-processamento.
+    }
 
     // TODO: criar o nó raiz com id 0, profundidade 0, sem decisões e LB inicial.
+    // std::unique_ptr<Node> ??
+    auto root = std::make_unique<Node>();
+    root->id = 0;
+    root->depth = 0;
+    root->lb = -std::numeric_limits<double>::infinity();
+    
     // TODO: inserir o nó raiz em open_ usando pushNode().
+    this->pushNode(std::move(root));
+    // this->open_.push_back(root);
 }
 
 // ---------------------------------------------------------------
@@ -143,7 +167,7 @@ std::unique_ptr<Node> BranchAndPrice::selectNode() {
 }
 
 void BranchAndPrice::pushNode(std::unique_ptr<Node> n) {
-    // TODO
+    this->open_.push_back(std::move(n));
 }
 
 void BranchAndPrice::updateGlobalLB() {

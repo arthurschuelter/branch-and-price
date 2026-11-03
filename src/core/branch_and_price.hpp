@@ -1,6 +1,8 @@
 #pragma once
 #include <vector>
 #include <deque>
+#include <cmath>
+#include <limits>
 #include <memory>
 #include <chrono>
 #include <string>
@@ -67,6 +69,7 @@ public:
     BranchAndPrice(const Instance& inst, const Config& cfg);
     ~BranchAndPrice();
     Solution solve();                       // laço principal da árvore
+
     double lowerBound() const { return global_lb_; }
     const Stats& stats() const { return stats_; }
 
