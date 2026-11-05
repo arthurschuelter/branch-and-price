@@ -29,9 +29,10 @@ int main(int argc, char** argv) {
 
     // std::cout << "Instância lida: " << instance.vertexCount() << " vértices, "
     //           << instance.conflictsCount() << " conflitos.\n";
+    instance.printInstance();
 
-    const RouteEvaluation valid_route = instance.evaluateRoute({1, 2, 3}, 1);
-    std::cout << "Rota (1, 2, 3), dia 1: ";
+    const RouteEvaluation valid_route = instance.evaluateRoute({1, 4, 5}, 1);
+    std::cout << "Rota (1, 4, 5), dia 1: ";
     valid_route.printResult();
 
     // const RouteEvaluation invalid_route = instance.evaluateRoute({1, 2}, 1);
@@ -48,7 +49,6 @@ int main(int argc, char** argv) {
     };
     
     // TODO: flags extras p/ ablações (--no-heur-pricing, --dfs, --bestbound, ...)
-    // instance.printInstance();
     BranchAndPrice bp(instance, cfg);
     bp.solve();
     // Solution sol = bp.solve();

@@ -1,4 +1,5 @@
 #include "branch_and_price.hpp"
+#include <iterator>
 // #include "instance.hpp"
 // #include "solver_rmp.hpp"
 // #include "pricing.hpp"
@@ -18,7 +19,7 @@ BranchAndPrice::~BranchAndPrice() = default;
 Solution BranchAndPrice::solve() {
     t0_ = std::chrono::steady_clock::now();
     initRoot();
-
+    return incumbent_;
     while (!open_.empty() && !timeIsUp()) {
         auto node = selectNode();
 
