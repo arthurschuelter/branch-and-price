@@ -1,340 +1,241 @@
-# Roadmap do Projeto de PLI: Branch-and-Price
-**Problema de Roteamento com Prioridades e Conflitos**  
+# Roadmap de PLI: Branch-and-Price para Roteamento e Bin Packing
+
 *Disciplina: Programação Linear Inteira — IC/UNICAMP*  
 *Professor: Prof. Flávio K. Miyazawa*
 
----
+## Escopo e fontes
 
-## 📌 Visão Geral e Objetivos Pedagógicos
+Este plano mantém o suporte ao **Roteamento com Prioridades e Conflitos** e acrescenta o **Bin Packing com Classes de Conflito**. As referências são [enunciado-roteamento.pdf](enunciado-roteamento.pdf) (Projeto 1) e [enunciado-bin-packing.pdf](enunciado-bin-packing.pdf) (Projeto 2). Números de seções abaixo sempre identificam o respectivo documento.
 
-Este roadmap foi desenhado para guiar o desenvolvimento do projeto prático individual e estruturar suas interações com LLMs. 
+O núcleo reutilizável reúne gestão da árvore, PMR, geração de colunas, decisões SAME/DIFFERENT, limites de tempo e logs. Formulação, pricing, parser, solução e saída são específicos de cada problema. A divisão em módulos é uma decisão de projeto, não uma estrutura de código imposta pelos PDFs.
 
-### Objetivos do Trabalho
-1. **Domínio Teórico e Prático de Branch-and-Price:** Formular o Problema Mestre Restrito (PMR), entender dualidade, implementar Geração de Colunas e aplicar ramificação de Ryan-Foster.
-2. **Uso Restrito do Gurobi:** O Gurobi deve atuar puramente como solver de Programação Linear (LP) para relaxações dos nós e para o subproblema de pricing inteiros/heurística de arredondamento. A árvore de busca e o gerenciamento de colunas são codificados em C++.
-3. **Uso Transparente e Crítico de LLM:** Registrar todo o histórico de interações na pasta `ia/` e identificar falhas conceituais/código gerado incorretamente para o relatório.
+| Aspecto | Roteamento | Bin packing |
+|---|---|---|
+| Elementos | Clientes em `0..n-1`, excluindo depósito `s` | Itens em `1..n` |
+| Coluna | Sequência de clientes e dia `(R,d)` | Conjunto não vazio `B` |
+| Objetivo | Deslocamento + prioridade | Número de recipientes |
+| Conflitos | Arestas entre clientes | Classes, possivelmente sobrepostas |
+| Pricing | Seleção e ordenação de clientes por dia | Mochila com conflitos |
+| Capacidade | Parâmetro `-C` | Campo do arquivo |
+| Arredondamento MIP | `-h`, tempo adicional após `-t` | Opcional, dentro de `-t` |
 
----
+**Não basta zerar deslocamentos e prioridades para obter o novo objetivo:** isso tornaria todas as soluções de roteamento de custo zero. Bin packing exige custo unitário por recipiente e não tem dias nem depósito.
 
-## 📅 Visão Geral das Fases
+Nos dois projetos, implementar em C++ a árvore, a ramificação e a geração de colunas. Usar Gurobi apenas como solver LP no mestre; MIP é permitido no pricing exato e na heurística de arredondamento. A execução normal tenta pricing heurístico antes do exato, acionando este quando a heurística não encontra coluna de custo reduzido negativo.
 
-```
-[Fase 0] Modelagem Matemática & Exemplo Manual
-   │
-[Fase 1] Infraestrutura, Parser & Verificador
-   │
-[Fase 2] Geração de Colunas no Nó Raiz (Ponto de Controle)
-   │
-[Fase 3] Árvore Branch-and-Price (Ryan-Foster & Heurística -h)
-   │
-[Fase 4] Bateria de Experimentos & Estudos de Ablação
-   │
-[Fase 5] Relatório, Histórico de IA & Empacotamento
-   │
-[Fase 6] Preparação para a Entrevista Individual
-```
+## Fase 0 — Formulação e exemplos manuais
 
----
+### 0.1 Roteamento: mestre e pricing
 
-## 🔬 Fase 0: Fundamentação Matemática e Exemplo Manual
+Seja `J = V \\ {s}`, e seja $\Omega$ o conjunto das sequências não vazias de clientes distintos que respeitam capacidade e conflitos. A ordem de visita faz parte da coluna. Para $d=1,\ldots,n-1$:
 
-### 0.1 Formulação Matemática
+$$\rho(R)=c(s,i_1)+\sum_{k=2}^{|R|}c(i_{k-1},i_k)+c(i_{|R|},s),$$
+$$c_{R,d}=\rho(R)+\sum_{i\in R}\pi(i,d).$$
 
-#### Problema Mestre Restrito (PMR)
-Seja $\Omega$ o conjunto de todas as sequências de clientes distintos que não contêm o depósito e respeitam a capacidade $w(R) \le C$ e o grafo de conflitos $G=(V,E)$. A ordem dos clientes faz parte da rota.  
-Seja $d \in \{1, \dots, n-1\}$ o dia de execução da rota.
+O mestre inteiro tem variáveis $x_{R,d}\in\{0,1\}$ e formulação
 
-Variável de decisão binária:  
-$$x_{R,d} = \begin{cases} 1, & \text{se a rota } R \text{ for executada no dia } d \\ 0, & \text{caso contrário} \end{cases}$$
+$$\min\sum_{R\in\Omega}\sum_d c_{R,d}x_{R,d},$$
+$$\sum_{R\ni i}\sum_d x_{R,d}=1\quad(i\in J),\qquad
+\sum_R x_{R,d}\le1\quad(d=1,\ldots,n-1).$$
 
-Parâmetros:
-- Para $R=(i_1,\ldots,i_m)$, $\rho(R)=c(s,i_1)+\sum_{k=2}^{m}c(i_{k-1},i_k)+c(i_m,s)$, usando a matriz de custos de deslocamento da instância. A ordem já está especificada em $R$.
-- $\pi(R,d) = \sum_{i \in R} \pi(i,d)$: Custo de prioridade da rota $R$ no dia $d$.
-- $c_{R,d} = \rho(R) + \pi(R,d)$: Custo total da rota $R$ no dia $d$.
+No LP, substituir o domínio por $x_{R,d}\ge0$. No PMR, usar apenas as colunas disponíveis. Os duais são $u_i\in\mathbb R$ para cobertura e $\lambda_d\le0$ para dias. O dual completo maximiza $\sum_i u_i+\sum_d\lambda_d$, sujeito a $\sum_{i\in R}u_i+\lambda_d\le c_{R,d}$.
 
-**Formulação Primal do Mestre:**
-$$\min \sum_{R \in \Omega} \sum_{d=1}^{n-1} c_{R,d} \cdot x_{R,d}$$
+$$\bar c_{R,d}=\rho(R)+\sum_{i\in R}(\pi(i,d)-u_i)-\lambda_d.$$
 
-Sujeito a:
-1. **Atendimento de cada cliente $i \in V \setminus \{s\}$ em exatamente um dia:**
-   $$\sum_{R \in \Omega : i \in R} \sum_{d=1}^{n-1} x_{R,d} = 1, \quad \forall i \in V \setminus \{s\} \quad (\text{variáveis duais } u_i)$$
-2. **No máximo uma rota por dia $d$:**
-   $$\sum_{R \in \Omega} x_{R,d} \le 1, \quad \forall d \in \{1, \dots, n-1\} \quad (\text{variáveis duais } \lambda_d \le 0)$$
-3. **Domínio:**
-   $$x_{R,d} \ge 0, \quad \forall R \in \Omega, \forall d \in \{1, \dots, n-1\}$$
+O pricing procura uma rota/dia com custo reduzido negativo. A certificação deve cobrir todos os dias. Uma formulação MIP deve assegurar seleção, capacidade, conflitos, conexão ao depósito e eliminação de subciclos; restrições de fluxo ou grau isoladas não bastam.
 
-#### Custo Reduzido e Subproblema de Pricing
-Dado o vetor de preços duais $(u_i)_{i \in V \setminus \{s\}}$ e $(\lambda_d)_{d=1}^{n-1}$, o custo reduzido $\bar{c}_{R,d}$ de uma variável $x_{R,d}$ é dado por:
-$$\bar{c}_{R,d} = c_{R,d} - \sum_{i \in R} u_i - \lambda_d = \rho(R) + \sum_{i \in R} \left(\pi(i,d) - u_i\right) - \lambda_d$$
+Os custos são simétricos, mas **não se pressupõe desigualdade triangular**. Coordenadas servem apenas para visualização. O projeto exige prioridades não decrescentes no dia (Seção 11.1). Por isso, uma solução inteira com lacunas entre dias pode ser compactada para os dias `1..k`, preservando a ordem e sem aumentar o custo. Recalcular o objetivo após compactar, antes de gravar a saída.
 
-O subproblema de **Pricing** busca encontrar uma rota válida $R^*$ e um dia $d^*$ tais que $\bar{c}_{R^*,d^*} < -\epsilon$ (onde $\epsilon > 0$ é a tolerância numérica, ex: $10^{-6}$).
+### 0.2 Bin packing: mestre e pricing
 
-### 0.2 Exemplo Calculado à Mão (Seção 8 do Enunciado)
-- Instância com $s=0$, 6 clientes, $C=10$, distância de Manhattan, $\pi(i,d) = a_i \cdot d$.
-- Escolha uma solução fracionária ou uma iteração da relaxação linear.
-- **Checklist para o Relatório:**
-  - [ ] Registrar os valores numéricos de $u_i$ e $\lambda_d$.
-  - [ ] Demonstrar o cálculo detalhado de $\bar{c}_{R,d}$ para pelo menos duas rotas candidatas.
-  - [ ] Para um nó com solução fracionária, mostrar a matriz $f_{i,j} = \sum_{R: i,j \in R} \sum_d x_{R,d}$ e escolher o par de Ryan-Foster com $f_{i,j}$ mais próximo de $0.5$.
+Seja $\mathcal B$ o conjunto dos subconjuntos não vazios $B\subseteq I$ com $\sum_{i\in B}s_i\le C$ e $|B\cap S_t|\le1$ para toda classe. O modelo obrigatório (Seção 10.3) é:
 
----
+$$\min\sum_{B\in\mathcal B}x_B,\qquad
+\sum_{B\ni i}x_B=1\quad(i\in I),\qquad x_B\in\{0,1\}.$$
 
-## 🛠️ Fase 1: Infraestrutura de Software, Parser e Ferramentas Auxiliares
+A relaxação usa $x_B\ge0$; o dual maximiza $\sum_i u_i$, sujeito a $\sum_{i\in B}u_i\le1$, com $u_i$ livres. Assim:
 
-### 1.1 Estrutura do Repositório Git
-A estrutura deve seguir rigorosamente a especificação do enunciado:
+$$\bar c_B=1-\sum_{i\in B}u_i,\qquad
+\alpha^*=\max_{B\in\mathcal B}\sum_{i\in B}u_i.$$
 
-```text
-roteamento/
-├── codigo/
-│   ├── Makefile
-│   ├── main.cpp
-│   ├── instance.hpp / instance.cpp
-│   ├── solver_rmp.hpp / solver_rmp.cpp
-│   ├── pricing.hpp / pricing.cpp
-│   ├── branch_and_price.hpp / branch_and_price.cpp
-│   └── utils.hpp
-├── verificador/
-│   ├── verificador.cpp
-│   └── Makefile
-├── testes/
-│   ├── enum_exata.cpp (Algoritmo de enumeração completa para n < 8)
-│   ├── gerador_instancias.py
-│   └── rodar_experimentos.py
-├── ia/
-│   └── conversas_llm.md (ou PDFs/HTMLs numerados cronologicamente)
-├── relatorio.pdf
-└── README
+Uma formulação exata do pricing usa $y_i\in\{0,1\}$, maximiza $\sum_i u_i y_i$ e impõe:
+
+$$\sum_i s_i y_i\le C,\qquad \sum_{i\in S_t}y_i\le1\ (t=1,\ldots,k),\qquad \sum_i y_i\ge1.$$
+
+Há coluna melhorante quando $\alpha^*>1$ (com tolerância numérica na implementação). Não há custos de viagem, variáveis de dia ou duais $\lambda_d$.
+
+### 0.3 Exemplos e conferência manual
+
+- **Roteamento, Seção 8:** depósito 0, seis clientes, capacidade 10; rotas `(1,3)`, `(5,6)`, `(2,4)` nos dias 1, 2, 3, com custo ótimo **59**. Registrar duais $u_i,\lambda_d$, custos reduzidos de pelo menos duas candidatas e um par fracionário para Ryan–Foster; comparar com logs. É requisito do relatório antigo.
+- **Bin packing, Seção 7:** tamanhos `(5,5,4,4,3,3,3,3)`, capacidade 10, classes `{1,2}`, `{3,4}`, `{5,6,7}`. Solução `{1,3}`, `{2,5}`, `{4,6,8}`, `{7}`, de valor ótimo **4**. Volume e maior classe dão apenas 3. Em três recipientes, todos teriam carga 10; o item 1, de tamanho 5, não pode acompanhar o item 2, e nenhum subconjunto dos demais soma 5. Conferir duais e pricing também neste caso como teste de desenvolvimento.
+
+## Fase 1 — Infraestrutura, interfaces e verificação
+
+### 1.1 Organização e código fornecido
+
+Manter os requisitos de empacotamento separados dos caminhos atuais do repositório. A entrega usa `codigo/`, `testes/`, `ia/` e `README`; o roteamento exige também `relatorio.pdf` e histórico Git. O verificador de roteamento pertence a `testes/`, não a um diretório obrigatório separado `verificador/`.
+
+Para bin packing, partir do código fornecido em `projeto/` (Seção 10.2): `main.cpp`, `binpacksolver.cpp`, `binpacksolver.h`, `binpacking.h`, `Makefile` e `instancias/`. Preservar a interface `SolveBinPacking` e a integração com `BinPackingData`, inclusive `Conflict`, `UpdateBest` e `CheckSolution`. Implementar o B&P em `binpacksolver.cpp` e arquivos auxiliares. Se o pacote ainda não estiver no repositório, obtê-lo antes dessa integração.
+
+**Manter a heurística probabilística First Fit Decreasing fornecida** como fonte de incumbente e colunas iniciais. Ela combina tamanho, participação em classes e aleatoriedade, em até 1000 rodadas, respeitando o orçamento restante e podendo parar ao atingir o LB. Não a substituir apenas por recipientes unitários. Reservar tempo para o B&P dentro de `T`.
+
+### 1.2 CLI e tempo
+
+Planejar dois executáveis, com interfaces oficiais:
+
+```sh
+./roteamento -f inst.txt -s 0 -C 10 -t 60 -h 5 -o saida.txt
+./binpack -f inst.txt -o saida.txt -t 60 -r 1
 ```
 
-### 1.2 Parser e CLI
-O programa principal em C++ deve aceitar rigorosamente os seguintes parâmetros via linha de comando:
-- `-f <arquivo>`: Caminho para a instância de entrada.
-- `-s <depósito>`: Índice do vértice que atua como depósito.
-- `-C <capacidade>`: Capacidade máxima do veículo (inteiro).
-- `-t <segundos>`: Tempo limite de execução para o Branch-and-Price.
-- `-h <segundos>`: Tempo adicional opcional para a heurística de arredondamento.
-- `-o <arquivo>`: Arquivo de saída com a solução e o limitante inferior.
+- Roteamento: `-f`, `-s`, `-C`, `-t`, `-o`; `-h` opcional. Tempo total até `t+h`, mais gravação.
+- Bin packing: `-f`, `-o`, `-t`; `-r` opcional, padrão 1. Capacidade vem da entrada; arredondamento, inicialização e demais etapas contam no tempo real `T`, mais gravação. Não transportar `-h` como tempo adicional para esse modo.
+- Usar relógio monotônico e propagar o tempo restante às chamadas LP/MIP, pricing, heurísticas e enumeração. Manter sempre uma incumbente viável e um LB certificado para interrupção.
 
-### 1.3 Formato Oficial da Instância
+### 1.3 Entradas oficiais
 
-O arquivo de entrada segue a Seção 10.2 do `enunciado.pdf`; comentários em linhas iniciadas por `#` são ignorados:
+Ignorar linhas iniciadas por `#` nos dois formatos.
 
-1. `n m`: número de vértices e número de arestas de conflito.
-2. `n` linhas, uma por vértice `i`: `w_i x_i y_i pi(i,1) ... pi(i,n-1)`. As coordenadas são apenas para visualização; os custos de prioridade são fornecidos para cada dia.
-3. `n(n-1)/2` linhas `i j c(i,j)`, uma para cada par `0 <= i < j < n`. Os custos são simétricos; a diagonal é zero.
-4. `m` linhas `i j` com as arestas do grafo de conflitos.
+**Roteamento (Seção 10.2):**
 
-O depósito é informado por `-s`, a capacidade por `-C`. `tests/instance_zero.txt` deve permanecer como o exemplo oficial da Seção 8, cujo ótimo é 59.
+1. `n m`.
+2. `n` linhas `w_i x_i y_i pi(i,1) ... pi(i,n-1)`.
+3. `n(n-1)/2` linhas `i j c(i,j)`, para `0 <= i < j < n`.
+4. `m` linhas `i j` de conflitos.
 
-As coordenadas não determinam `c(i,j)`. A distância de Manhattan e a fórmula $\pi(i,d)=a_i d$ valem para o exemplo da Seção 8; instâncias gerais fornecem a matriz de custos e a tabela de prioridades explicitamente.
-No projeto, os custos de prioridade dos clientes devem ser não decrescentes ao longo dos dias (hipótese do enunciado na Seção 11).
+Depósito e capacidade vêm da CLI; peso e prioridades do depósito são ignorados. Conflitos relevantes às rotas são entre clientes. Usar a matriz fornecida, não reconstruí-la pelas coordenadas. Validar capacidade e monotonicidade das prioridades.
 
-### 1.4 Verificador Independente e Enumeração Completa
-- [ ] **Verificador (`verificador.cpp`):**
-  - Lê o arquivo de entrada e o de saída.
-  - Valida partição de clientes, capacidade $w(R) \le C$, ausência de arestas de conflito em cada rota e recálculo exato dos custos $\rho(R)$ e $\pi(R,d)$.
-  - Garante que $\text{Limitante Inferior} \le \text{Custo da Solução}$.
-- [ ] **Enumeração Completa (`enum_exata.cpp`):**
-  - Gera todas as partições válidas de $V \setminus \{s\}$ e todas as permutações de visita e ordenações de dias para $n < 8$.
-  - Serve como a "pólice de seguro" para validar se o Branch-and-Price está encontrando a solução ótima global em instâncias pequenas.
+**Bin packing (Seção 9.2):**
 
----
+1. `n C k`.
+2. Uma linha com `n` tamanhos inteiros positivos, todos até `C`.
+3. `k` linhas `m_t i_1 ... i_m_t`.
 
-## 🚀 Fase 2: Geração de Colunas no Nó Raiz (Ponto de Controle)
+Itens são numerados de 1 a `n`. Classes podem se sobrepor, ser vazias ou unitárias; itens podem não pertencer a nenhuma classe. Consumir os `m_t` identificadores e ignorar repetições dentro da mesma classe. Preservar as classes e, se útil, derivar o grafo de conflitos pela união das cliques. Não confundir uma classe original com um grupo SAME da árvore.
 
-*Esta fase corresponde ao primeiro entregável formal do trabalho.*
+### 1.4 Saídas e verificadores
 
-### 2.1 Colunas Iniciais
-Para garantir que o PMR seja viável desde a iteração 0 no nó raiz:
-- Criar colunas unitárias: para cada cliente $i \in V \setminus \{s\}$ e cada dia $d \in \{1, \dots, n-1\}$, criar a rota $R = (i)$ com custo $c_{R,d} = c(s,i) + c(i,s) + \pi(i,d)$.
+Ambos os arquivos contêm, nesta ordem: valor da incumbente, melhor LB global certificado, número de rotas/recipientes e uma linha por rota/recipiente. Não acrescentar contagem de itens ao início dessas linhas.
 
-### 2.2 Loop de Geração de Colunas
+- Roteamento (Seção 10.3): linha `t` representa o dia `t`; clientes na ordem de visita, sem depósito. Recalcular deslocamento e prioridade.
+- Bin packing (Seção 9.3): valor igual ao número de recipientes; itens em qualquer ordem, mantendo IDs externos `1..n`. Executar `CheckSolution` antes de gravar.
+- Verificar cobertura exatamente uma vez, capacidade, conflitos, objetivo informado e `LB <= UB`. Essa última desigualdade sozinha **não prova** que o LB é correto; conferir limites contra enumeração em instâncias pequenas.
 
-```
-               ┌────────────────────────┐
-               │ Resolver PMR no Gurobi │
-               └───────────┬────────────┘
-                           │ Extrair duais u_i e λ_d
-                           ▼
-               ┌────────────────────────┐
-               │   Pricing Heurístico   │
-               └───────────┬────────────┘
-                           │ Encontrou c̄ < -ε ?
-                     ┌─────┴─────┐
-                 Sim │           │ Não
-                     ▼           ▼
-          ┌──────────────┐  ┌──────────────────────┐
-          │ Adicionar    │  │    Pricing Exato     │
-          │ colunas ao   │  └──────────┬───────────┘
-          │ PMR          │             │ Encontrou c̄ < -ε ?
-          └──────┬───────┘       ┌─────┴─────┐
-                 │           Sim │           │ Não
-                 │               ▼           ▼
-                 │        ┌──────────────┐  ┌─────────────┐
-                 │        │ Adicionar    │  │ Convergiu!  │
-                 │        │ colunas ao   │  │ Limitante   │
-                 │        │ PMR          │  │ Raiz Obtido │
-                 └───────>└──────┬───────┘  └─────────────┘
-                                 │
-                                 └──────> (Repetir Loop)
-```
+## Fase 2 — Geração de colunas e limites certificados
 
-### 2.3 Estratégias de Pricing
-1. **Pricing Heurístico:**
-   - Heurística Gulosa / Busca Local / Randomized Set Packing para construir rotas $R$ válidas maximizando $\sum_{i \in R} (u_i - \pi(i,d)) - \rho(R)$.
-   - Rápida execução para evitar chamadas custosas ao solver exato.
-2. **Pricing Exato:**
-   - Formulável como um MIP (ou enumeração explícita para instâncias de tamanho moderado) para cada dia $d \in \{1, \dots, n-1\}$.
-   - Deve respeitar restrições de capacidade, fluxo do TSP e restrições do grafo de conflitos $G=(V,E)$.
+### 2.1 Inicialização e ciclo
 
----
+- Roteamento: colunas unitárias para cada cliente/dia; construir uma incumbente atribuindo um cliente por dia.
+- Bin packing: colunas unitárias e recipientes da heurística fornecida; usar a solução dessa heurística como incumbente inicial.
+- Resolver o PMR como LP, extrair duais, executar pricing heurístico e inserir candidatas válidas de custo reduzido negativo. Se nenhuma for encontrada, chamar o exato. Repetir até certificação ou tempo limite.
+- Toda coluna deve respeitar as decisões do nó. Deduplicar conjuntos em bin packing e pares sequência/dia em roteamento.
+- No bin packing, usar gulosa por valor dual/tamanho, busca local ou aleatorização. Após fusões SAME, operar sobre grupos inteiros. Não remover isoladamente um item com dual negativo de um grupo obrigatório; considerar o valor agregado do grupo.
 
-## 🌳 Fase 3: Árvore de Branch-and-Price e Ramificação de Ryan-Foster
+### 2.2 Limites e interrupção
 
-### 3.1 Ramificação de Ryan-Foster
-Se a solução do PMR for fracionária:
-1. Calcular para cada par de clientes $i, j \in V \setminus \{s\}$ com $i < j$:
-   $$f_{i,j} = \sum_{R \in \Omega : i,j \in R} \sum_{d=1}^{n-1} x_{R,d}$$
-2. Selecionar o par $(i^*, j^*)$ cujo valor $f_{i^*, j^*}$ esteja mais próximo de $0.5$.
-3. Criar dois ramos na árvore de busca:
-   - **Ramo SAME ($x_{i^*,j^*} = 1$):** Os clientes $i^*$ e $j^*$ **devem** ser atendidos na mesma rota.
-     - *No PMR:* Eliminar colunas existentes onde exatamente um dos dois está presente.
-     - *No Pricing:* Tratar $i^*$ e $j^*$ como um único super-cliente ou impor restrição no MIP de pricing.
-   - **Ramo DIFFERENT ($x_{i^*,j^*} = 0$):** Os clientes $i^*$ e $j^*$ **não podem** ser atendidos na mesma rota.
-     - *No PMR:* Eliminar colunas existentes onde ambos $i^*$ e $j^*$ estão juntos.
-     - *No Pricing:* Adicionar a aresta $\{i^*, j^*\}$ ao grafo de conflitos temporário do nó.
+O valor do PMR incompleto é um **limite superior para o LP completo**, não um LB automaticamente válido para podas. Falha da heurística ou timeout do pricing não certificam ausência de colunas melhorantes. No roteamento, usar o valor do mestre como LB do nó somente após certificação exata para todos os dias, salvo implementação de outro limite demonstrado.
 
-### 3.2 Estratégias de Busca e Gestão da Árvore
-- Implementar busca em profundidade (**DFS**) e busca pelo melhor limitante (**Best-Bound**).
-- Tratar a viabilidade do PMR em nós profundos (se a poda por branching eliminar colunas suficientes a ponto de deixar o PMR inviável, usar variáveis artificiais com custo Big-$M$).
+No bin packing (Seção 10.4), iniciar com
 
-### 3.3 Heurística de Arredondamento (`-h`)
-- Quando o tempo limite `-t` for atingido, pegar todas as colunas geradas até o momento no nó atual ou na árvore global.
-- Resolver o PMR impondo integridade nas variáveis $x_{R,d} \in \{0,1\}$ usando o Gurobi MIP por até `-h` segundos para tentar atualizar a solução incumbente (Upper Bound).
+$$L_0=\max\left\{\left\lceil\frac{\sum_i s_i}{C}\right\rceil,\max_t|S_t|\right\},$$
 
----
+com máximo de classes igual a zero se `k=0`. Implementar o **limitante de Farley**:
 
-## 📊 Fase 4: Bateria de Experimentos e Estudos de Ablação
+$$z_{LP}\ge\frac{z_{PMR}}{\alpha},\qquad
+\alpha\ge\max\{1,\max_B u(B)\}.$$
 
-O relatório exige uma avaliação experimental com tabelas, gráficos e análises detalhadas.
+Uma cota superior certificada pelo pricing de maximização pode fornecer `alpha`, mesmo se ele não terminar. O valor de uma solução heurística do pricing é uma cota inferior para sua maximização e **não serve** para esse fim. Usar duais ótimos do PMR e a família de colunas admissíveis do nó. Se $\alpha^*\le1$, o mestre convergiu. Arredondar o LB de bin packing para cima com tolerância controlada, por exemplo $\lceil L-10^{-6}\rceil$.
 
-### 4.1 Conjunto de Experimentos (Ablações Obrigatórias)
+Cada filho herda o LB certificado do pai. Manter na fronteira também o nó em processamento e filhos ainda não processados ao tratar interrupções. O LB global considera todos os subproblemas abertos, limitado pela incumbente, e nunca regride abaixo do LB inicial. Ao esgotar a árvore, gravar `LB = UB`. No roteamento, zero é um LB inicial seguro pelos custos não negativos; não aplicar cotas de número de recipientes a um objetivo de deslocamento/prioridade.
 
-| ID | Estudo de Ablação | Configuração A | Configuração B |
-| :--- | :--- | :--- | :--- |
-| **EXP1** | Estratégia de Pricing | Apenas Pricing Exato | Pricing Heurístico + Pricing Exato |
-| **EXP2** | Pré-processamento | Sem Pré-processamento | Com Pré-processamento / Propagação |
-| **EXP3** | Regra de Ryan-Foster | Par mais próximo de $0.5$ | Regra Alternativa (ex: maior custo reduzido acumulado) |
-| **EXP4** | Busca na Árvore | Busca em Profundidade (DFS) | Melhor Limitante (Best-Bound) |
-| **EXP5** | Impacto do `-h` | Sem Heurística de Arredondamento | Com Heurística de Arredondamento |
+## Fase 3 — Ryan–Foster, viabilidade e arredondamento
 
-### 4.2 Automação dos Testes
-- Criar script em Python (`testes/rodar_experimentos.py`) para executar todas as instâncias e gerar relatórios em CSV/JSON contendo:
-  - Tempo total e tempo gasto no pricing.
-  - Número de nós explorados.
-  - Número total de colunas geradas.
-  - Gap de integridade final ($\frac{\text{UB} - \text{LB}}{\text{UB}} \times 100\%$).
+### 3.1 Decisões de ramificação
 
----
+Calcular a fração em que cada par aparece junto:
 
-## 📝 Fase 5: Documentação, Relatório e Histórico de IA
+$$\phi_{ij}=\sum_{B\ni i,j}x_B\quad\text{ou}\quad
+\phi_{ij}=\sum_{R\ni i,j}\sum_d x_{R,d}.$$
 
-### 5.1 Organização do Diretório `ia/`
-- Salvar todos os logs de conversas com ChatGPT, Claude, Gemini ou outras LLMs.
-- Garantir a ordem cronológica e a inclusão de **Prompts e Respostas Íntegras**.
+Selecionar somente pares **fracionários**, $\epsilon<\phi_{ij}<1-\epsilon$, por exemplo o mais próximo de 0,5.
 
-### 5.2 Estrutura Obrigatória do `relatorio.pdf`
-1. **Descrição do Algoritmo:** Formulando o Mestre, Pricing, Branching, Estruturas de Dados e RMP Feasibility.
-2. **Iteração Calculada à Mão:** Exemplo numérico da Seção 8 conferido com a saída do log do programa (`stderr`).
-3. **Experimentos e Discussão:** Tabelas e gráficos comparativos dos experimentos EXP1 a EXP5.
-4. **Onde a IA Errou:** Pelo menos **dois casos concretos** onde a LLM gerou código/conceito incorreto ou ineficiente e como você identificou e corrigiu a falha.
-5. **Limitações do Algoritmo:** Análise de gargalos e tipos de instâncias difíceis.
-6. **Resultados da Heurística de Arredondamento (`-h`).**
+- **SAME:** remover colunas que contêm exatamente um dos dois; pricing seleciona ambos ou nenhum.
+- **DIFFERENT:** remover colunas que contêm ambos; acrescentar conflito no pricing.
+- Aplicar transitividade de SAME e propagar DIFFERENT entre grupos. Podar grupos que excedem capacidade ou contêm conflitos internos.
 
----
+Em bin packing, usar uma coluna por conjunto. A Seção 10.5 garante um par fracionário quando o LP é fracionário. Em cada nó, agregar grupos SAME, somando tamanhos e usando seus conflitos. Cada grupo válido sozinho fornece uma coluna inicial: **não são necessárias artificiais** para manter o PMR viável.
 
-## 🎤 Fase 6: Preparação para a Entrevista Individual
+No roteamento, preservar as visitas individuais: fundir decisões de seleção não permite substituir clientes por um ponto geométrico único. Uma rota válida contendo cada grupo inteiro, para cada dia, também permite inicializar o mestre sem artificiais. A ordem interna deve ser explicitamente construída e custeada.
 
-A avaliação final conta com uma entrevista individual ao vivo. O checklist de domínio teórico/prático inclui:
+**Cuidado específico do roteamento:** colunas distintas podem ter o mesmo conjunto de clientes, mas ordens/dias diferentes. Não transportar automaticamente a prova de existência de par fracionário do bin packing. Se todos os pares são integrais, os conjuntos com suporte positivo formam blocos disjuntos; resolver a atribuição desses blocos aos dias, escolhendo a melhor sequência disponível para cada bloco/dia, recupera uma solução inteira sem piorar o LP convergido. Implementar e testar esse fechamento do nó, evitando ramificar em pares já fixos.
 
-- [ ] **Dualidade e Custo Reduzido:** Explicar como a combinação de $u_i$ e $\lambda_d$ direciona a geração de colunas e por que o limitante inferior só é válido quando o pricing exato provar ausência de custos reduzidos negativos.
-- [ ] **Modificação do Pricing sob Ryan-Foster:** Demonstrar como as restrições de SAME e DIFFERENT alteram a estrutura do subproblema de pricing e o grafo de conflitos.
-- [ ] **Controle do Solver:** Explicar por que o Gurobi não faz o B&P sozinho e como sua estrutura C++ gerencia o ciclo de vida dos nós.
-- [ ] **Alteração de Código ao Vivo:** Estar preparado para realizar pequenas alterações e recompilar o projeto na frente do professor.
+Se uma implementação alternativa usar artificiais, empregar uma fase de viabilidade certificada; não declarar o problema inviável apenas porque o PMR filtrado está inviável, nem aceitar artificiais como solução original.
 
----
+### 3.2 Busca e arredondamento
 
-## 💬 Guia de Prompts para Interagir com LLMs
+Implementar DFS e Best-Bound como estratégias comparáveis. Podar por inviabilidade comprovada, LB certificado que não melhora a incumbente ou solução inteira ótima do nó após convergência.
 
-Abaixo estão modelos de prompts estratégicos estruturados para você utilizar durante o desenvolvimento. Eles foram formulados para atuar como um **tutor/coach de programação e PLI**, auxiliando na resolução de problemas sem substituir o seu aprendizado.
+O arredondamento resolve um mestre inteiro restrito a colunas já geradas. Pode usar o banco global de colunas válidas no problema original, inclusive colunas incompatíveis com o nó atual. Validar a solução antes de atualizar a incumbente; seu resultado fornece **apenas UB**, nunca LB para a árvore completa.
 
-### Prompt 1: Validação da Formulação e Dualidade (Fase 0)
-```text
-Atue como um professor especialista em Programação Linear Inteira e Branch-and-Price.
-Estou modelando o Problema de Roteamento com Prioridades e Conflitos.
-Minhas variáveis do problema mestre são x_{R,d} (binárias, indicando se a rota válida R roda no dia d).
+- Roteamento: ao esgotar `-t` sem prova de otimalidade, executar por até `-h` segundos adicionais, se solicitado.
+- Bin packing: opcional em algum nó, com orçamento curto **dentro de `T`** (Seção 10.6).
 
-Aqui estão as minhas restrições:
-1. Cada cliente i é atendido exatamente uma vez.
-2. No máximo uma rota é realizada por dia d.
+## Fase 4 — Testes e experimentos
 
-Por favor:
-1. Escreva o Problema Mestre Restrito (PMR) na forma primal.
-2. Derive formalmente as variáveis duais associadas a cada restrição.
-3. Demonstre passo a passo como obter a equação do custo reduzido c̄_{R,d}.
-4. Explique como o subproblema de pricing utiliza esses valores duais.
+- [ ] Exemplos oficiais: roteamento com ótimo 59 e bin packing com ótimo 4, em arquivos separados.
+- [ ] Enumeração independente: partições, ordens de visita e dias no roteamento; partições em recipientes no bin packing. Comparar ótimos e limites em dezenas de instâncias pequenas aleatórias.
+- [ ] Casos de bin packing: `k=0`, classes sobrepostas, repetições, classes vazias/unitárias, item sem classe, classe com todos os itens e tamanhos iguais a `C`.
+- [ ] Casos de roteamento: depósito diferente de zero, prioridades constantes e crescentes, custos não métricos, compactação de dias e fracionamento entre colunas com o mesmo conjunto.
+- [ ] Nós SAME/DIFFERENT, conflitos internos, capacidade de grupos, deduplicação, viabilidade após filtragem e interrupção durante pricing.
+- [ ] Confirmar orçamento de tempo, solução de saída viável e `LB <= OPT <= UB` usando enumeração.
 
-Não escreva código ainda, foque exclusivamente na explicação matemática rigorosa.
-```
+No **roteamento**, são obrigatórios verificador próprio, enumeração independente, exemplo oficial e logs em `stderr` por nó: LB, incumbente, colunas, chamadas heurísticas/exatas e tempo (Seção 12.4). Manter também para bin packing como critérios de qualidade do projeto; o novo PDF não exige a mesma bateria formal.
 
-### Prompt 2: Modelagem do Pricing e Modificação sob Ryan-Foster (Fase 2 e 3)
-```text
-Estou implementando o subproblema de pricing para um algoritmo de Branch-and-Price em C++ com Gurobi.
-O objetivo do pricing é encontrar uma rota R e um dia d que minimizem o custo reduzido.
+As ablações abaixo são obrigatórias no relatório de roteamento (Seção 12.5) e recomendadas para bin packing:
 
-Preciso entender exatamente como aplicar o Branching de Ryan-Foster no subproblema de pricing:
-1. Quando temos uma decisão SAME(i, j) (os clientes i e j DEVEM estar na mesma rota), como isso deve ser imposing no modelo de pricing do Gurobi? E em uma heurística de busca local?
-2. Quando temos uma decisão DIFFERENT(i, j) (os clientes i e j NÃO Podem estar na mesma rota), como isso altera o grafo de conflitos original?
+| Estudo | Comparação |
+|---|---|
+| Pricing | Só exato × heurístico seguido de exato |
+| Pré-processamento | Com × sem agregação/propagação, preservando decisões de branching em ambos |
+| Par de branching | Mais próximo de 0,5 × outra regra sobre pares fracionários |
+| Busca | DFS × Best-Bound |
+| Arredondamento | Com × sem, respeitando o orçamento de cada modo |
 
-Forneça explicações conceituais e um trecho de exemplo em C++ utilizando a API C++ do Gurobi.
-```
+O modo “só exato” é uma configuração de ablação; a execução normal segue heurística primeiro. Registrar tempo, nós, colunas, LB, UB e gap, com sementes e scripts reprodutíveis. Para UB zero, registrar gap zero se LB também é zero, evitando divisão por zero. No relatório antigo, incluir tabelas, pelo menos um gráfico e discussão dos resultados.
 
-### Prompt 3: Diagnóstico de Erros Numéricos e Viabilidade no PMR (Fase 3)
-```text
-Estou enfrentando um problema de inviabilidade (INFEASIBLE) no meu Problema Mestre Restrito (PMR) em nós mais profundos da árvore de Branch-and-Price.
-Isso ocorre quando as restrições de Ryan-Foster filtram muitas colunas existentes e o solver não encontra rotas válidas para cobrir todos os clientes.
+## Fase 5 — Documentação e entrega
 
-1. Qual é a prática padrão em Branch-and-Price para garantir a viabilidade do PMR em todos os nós da árvore?
-2. Como posso implementar variáveis artificiais com penalização Big-M para evitar inviabilidade no Gurobi?
-3. Como essas variáveis artificiais afetam a extração dos valores duais?
+### 5.1 Requisitos comuns
 
-Explique a teoria e mostre um pseudocódigo do ajuste no PMR.
-```
+- [ ] `codigo/`: fontes C++ e `Makefile`; `make` gera o executável e o caminho do Gurobi é configurável.
+- [ ] `testes/`: instâncias e scripts; incluir ferramentas de verificação desenvolvidas.
+- [ ] `ia/`: conversas completas, prompts **e respostas**, em ordem cronológica, incluindo esta revisão.
+- [ ] `README`: compilação, execução e versões; para bin packing, descrever também os métodos de pricing.
+- [ ] Um `.zip` ou `.tar.gz` sem executáveis, objetos, bibliotecas compiladas ou diretórios de build.
+- [ ] Trabalho individual, sem compartilhamento de código, texto ou conversas entre alunos; domínio do código entregue.
 
-### Prompt 4: Identificação de Erros da IA para o Relatório (Fase 5)
-```text
-Analise o seguinte trecho de código/conceito que você (ou outra LLM) gerou anteriormente para o cálculo do custo reduzido e gerenciamento de colunas duplicadas:
+### 5.2 Exigências específicas dos PDFs
 
-[INSERIR CÓDIGO OU RESPOSTA DA IA AQUI]
+| Item | Roteamento (Seção 12) | Bin packing (Seção 11) |
+|---|---|---|
+| Destinatário | `fkm@unicamp.br` | `fkm@unicamp.br` |
+| Assunto exato | `[PLI] Roteamento com Prioridades e Conflitos - Branch & Price` | `[PLI] Bin Packing com Classes de Conflito` |
+| Prazo informado | 15/novembro/2026 | Até duas semanas após divulgação; confirmar a data de divulgação |
+| Relatório PDF | Obrigatório | Não listado como entrega obrigatória |
+| Histórico Git | Entregar com o código | Não explicitamente exigido; manter como prática de desenvolvimento |
+| Ponto de controle e entrevista | Previstos; datas informadas em sala | Não explicitamente previstos no novo PDF |
 
-Por favor, identifique:
-1. Há algum erro de lógica ou erro numérico na fórmula do custo reduzido?
-2. Como esse código trata colunas duplicadas no PMR?
-3. Qual seria a forma correta e eficiente de reescrever este trecho em C++ moderno?
+O relatório de roteamento deve apresentar: algoritmo e estruturas; iteração manual da Seção 8 com duais, duas candidatas e branching; experimentos; pelo menos dois erros concretos da IA e respectivas correções; limitações; resultados do arredondamento `-h`. Não inventar ocorrências para preencher a seção de erros.
 
-Essa análise será utilizada para documentar a seção "Onde a IA errou" do meu relatório final.
-```
+A preparação para a entrevista antiga inclui explicar dualidade, pricing, SAME/DIFFERENT, certificação de LB, viabilidade do PMR, arredondamento, duplicatas, tolerâncias e modificar o código ao vivo. Manter esse nível de compreensão também para o novo projeto, sem atribuir a ele requisitos de avaliação ausentes do PDF.
 
----
+## Sequência de implementação e critérios de conclusão
 
-## 🎯 Resumo do Checklist de Entrega
+1. Fixar os dois modelos e exemplos, separando contratos de entrada/saída e objetivo.
+2. Preparar parsers e verificadores; integrar e preservar o código fornecido de bin packing.
+3. Validar geração de colunas na raiz de cada problema, com certificação exata e Farley no bin packing.
+4. Implementar grupos SAME/DIFFERENT, viabilidade, árvore e manutenção do LB global sob timeout.
+5. Integrar arredondamento com os dois regimes de tempo; validar contra enumeração.
+6. Executar experimentos e preparar cada pacote conforme seu enunciado.
 
-- [ ] Código C++ limpo com `Makefile` configurável em `codigo/`
-- [ ] Executável compila e roda com a interface de linha de comando solicitada
-- [ ] Verificador em `verificador/` validando arquivos de saída
-- [ ] Algoritmo de enumeração completa em `testes/`
-- [ ] Diretório `ia/` contendo todas as conversas íntegras com LLMs
-- [ ] Histórico de commits no repositório Git
-- [ ] `relatorio.pdf` completo com todas as 6 seções obrigatórias
-- [ ] Domínio total do código para a entrevista individual
+Este roadmap planeja suporte aos dois problemas; sua revisão não implica que os módulos, testes ou entregas já estejam implementados.
