@@ -6,7 +6,9 @@
 #include <memory>
 #include <chrono>
 #include <string>
+
 #include "instance.hpp"
+#include "solver_rmp.hpp"
 
 struct Column {
     std::vector<int> route;   // ordem de visita (sem o depósito) -> útil p/ saída
@@ -61,7 +63,6 @@ struct Config {
 // Classe principal
 // ---------------------------------------------------------------
 class Instance;     // instance.hpp
-class RMPSolver;    // solver_rmp.hpp  (wrapper do Gurobi: LP do mestre)
 class Pricer;       // pricing.hpp     (heurístico + exato)
 
 class BranchAndPrice {
@@ -72,6 +73,11 @@ public:
 
     double lowerBound() const { return global_lb_; }
     const Stats& stats() const { return stats_; }
+    const std::vector<Column>& pool() const { return pool_; }
+    
+    // --- bebug ---
+    void printPool();
+    void printOpen();
 
 private:
     // --- árvore ---
@@ -98,6 +104,7 @@ private:
     bool timeIsUp() const;
     void updateIncumbent(const Solution& s);
     void logNode(const Node& node) const;             // stderr: ajuda no exemplo à mão
+
 
     const Instance& inst_;
     Config cfg_;

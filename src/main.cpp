@@ -29,7 +29,7 @@ int main(int argc, char** argv) {
 
     // std::cout << "Instância lida: " << instance.vertexCount() << " vértices, "
     //           << instance.conflictsCount() << " conflitos.\n";
-    instance.printInstance();
+    // instance.printInstance();
 
     const RouteEvaluation valid_route = instance.evaluateRoute({1, 4, 5}, 1);
     std::cout << "Rota (1, 4, 5), dia 1: ";
@@ -50,7 +50,17 @@ int main(int argc, char** argv) {
     
     // TODO: flags extras p/ ablações (--no-heur-pricing, --dfs, --bestbound, ...)
     BranchAndPrice bp(instance, cfg);
-    bp.solve();
+    Solution sol = bp.solve();
+
+    std::cout << "Custo: " << sol.cost << '\n';
+
+    for (const auto& column : sol.columns) {
+        std::cout << "Dia " << column.day << ":";
+        for (int customer : column.route) {
+            std::cout << ' ' << customer;
+        }
+        std::cout << " | custo: " << column.cost << '\n';
+    }
     // Solution sol = bp.solve();
     
     // TODO: escrever sol + bp.lowerBound() em 'out' no formato do enunciado

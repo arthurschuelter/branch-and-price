@@ -1,5 +1,8 @@
 #include "branch_and_price.hpp"
+#include <chrono>
+#include <cmath>
 #include <iterator>
+#include <stdexcept>
 // #include "instance.hpp"
 // #include "solver_rmp.hpp"
 // #include "pricing.hpp"
@@ -16,10 +19,85 @@ BranchAndPrice::~BranchAndPrice() = default;
 // ---------------------------------------------------------------
 // Laço principal
 // ---------------------------------------------------------------
+
+
 Solution BranchAndPrice::solve() {
     t0_ = std::chrono::steady_clock::now();
     initRoot();
-    return incumbent_;
+
+    RMPSolver rmp(this->inst_);
+ 
+    for (const auto& column : this->pool_) {
+        rmp.addColumn(column);
+    }
+
+    double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - this->t0_
+    ).count();
+
+    double remainingSeconds = this->cfg_.time_limit - elapsed;
+    int grbStatus = rmp.solveLP(remainingSeconds);
+    if (grbStatus == GRB_OPTIMAL) {
+        Solution solution;
+        solution.cost = rmp.objective();
+
+        auto x = rmp.values();
+        if (x.size() != this->pool_.size()) {
+            throw std::runtime_error(
+                "Quantidade de valores diferente da quantidade de colunas"
+            );
+        }
+        
+        for (int v = 0; v < this->inst_.vertexCount(); ++v) {
+            if (v == this->inst_.depot) { continue; }
+
+            double sum = 0.0;
+            for (std::size_t k = 0; k < x.size(); ++k) {
+                if (this->pool_[k].has[v]) {
+                    sum += x[k];
+                }
+            }
+
+            if (std::abs(sum - 1.0) > 1e-6) {
+                throw std::runtime_error("Cobertura incorreta de cliente");
+            }
+        }
+
+        // Conferir o limite de uma rota por dia, com tolerância 1e-6.
+        for (int d = 1; d < this->inst_.vertexCount(); ++d) {
+            double sum = 0.0;
+            for (std::size_t k = 0; k < x.size(); ++k) {
+                if (this->pool_[k].day == d) {
+                    sum += x[k];
+                }
+            }
+
+            if (sum > 1.0 + 1e-6) {
+                throw std::runtime_error("Limite de rotas por dia violado");
+            }
+        }
+
+        double objective = 0.0;
+        for (std::size_t k = 0; k < x.size(); ++k) {
+            objective += this->pool_[k].cost * x[k];
+        }
+
+        if (std::abs(objective - rmp.objective()) > 1e-6) {
+            throw std::runtime_error("Objetivo do PMR inconsistente");
+        }
+
+        for (std::size_t k = 0; k < x.size(); ++k) {
+            if (x[k] > 0.5) {
+                solution.columns.push_back(this->pool_[k]);
+            }
+        } 
+
+        return solution;
+    }
+
+    // this->printOpen();
+    // this->printPool();
+
     while (!open_.empty() && !timeIsUp()) {
         auto node = selectNode();
 
@@ -51,9 +129,6 @@ Solution BranchAndPrice::solve() {
     return incumbent_;
 }
 
-// ---------------------------------------------------------------
-// Raiz
-// ---------------------------------------------------------------
 void BranchAndPrice::initRoot() {
     this->pool_.clear();
     this->open_.clear();
@@ -104,6 +179,7 @@ bool BranchAndPrice::processNode(Node& node) {
 }
 
 bool BranchAndPrice::columnGeneration(Node& node) {
+    return true;
     while (!timeIsUp()) {
         // (a) TODO: rmp_->solveLP();  se inviável -> return false
         // (b) TODO: obter duais u_i e lambda_d
@@ -154,9 +230,18 @@ void BranchAndPrice::branch(const Node& node, int i, int j) {
 // Seleção de nós
 // ---------------------------------------------------------------
 std::unique_ptr<Node> BranchAndPrice::selectNode() {
-    // TODO: DFS  -> pop do fim (pilha)
+    std::unique_ptr<Node> node;
+    
+    if (cfg_.search == SearchStrategy::DFS) {
+        node = std::move(this->open_.back());
+        this->open_.pop_back();
+    }
+
     // TODO: BEST_BOUND -> nó com menor lb
-    return nullptr;
+    else if (cfg_.search == SearchStrategy::BEST_BOUND) {
+        node = nullptr;
+    }
+    return node;
 }
 
 void BranchAndPrice::pushNode(std::unique_ptr<Node> n) {
@@ -176,7 +261,11 @@ void BranchAndPrice::roundingHeuristic() {
 }
 
 bool BranchAndPrice::timeIsUp() const {
-    // TODO: comparar tempo decorrido com cfg_.time_limit
+    std::chrono::duration<double> elapsed =
+        std::chrono::steady_clock::now() - this->t0_;
+        
+    if (elapsed.count() >= this->cfg_.time_limit) { return true; }
+    
     return false;
 }
 
@@ -186,4 +275,22 @@ void BranchAndPrice::updateIncumbent(const Solution& s) {
 
 void BranchAndPrice::logNode(const Node& node) const {
     // TODO: imprimir no stderr nó, lb, ub, duais (útil p/ conferir o exemplo à mão)
+}
+
+void BranchAndPrice::printPool() {
+    int i = 0;
+    for (const auto& col : this->pool_) {
+        std::cout << i++ << ": ";
+        for (const auto& r : col.route) { 
+            std::cout << r << "-";
+        }
+        std::cout << std::endl;
+    }
+}
+
+void BranchAndPrice::printOpen() {
+    std::cout << "Open:\n";
+    for (const auto& node : this->open_) {
+        std::cout << "  " << node->id << std::endl;
+    }
 }

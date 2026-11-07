@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 
 project(branch_and_price LANGUAGES CXX)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 option(ENABLE_GUROBI "Build with Gurobi support" OFF)
 
 add_executable(bp
@@ -20,6 +22,8 @@ else()
 endif()
 
 if(ENABLE_GUROBI)
+    target_sources(bp PRIVATE src/core/solver_rmp.cpp)
+
     set(GUROBI_HOME "$ENV{GUROBI_HOME}" CACHE PATH "Gurobi installation directory")
     set(GUROBI_VERSION "130" CACHE STRING "Gurobi library version suffix")
 
