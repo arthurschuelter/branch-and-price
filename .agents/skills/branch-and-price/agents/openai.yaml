@@ -1,0 +1,4 @@
+interface:
+  display_name: "Branch-and-Price PLI"
+  short_description: "Desenvolvimento e validação do projeto de PLI"
+  default_prompt: "Use $branch-and-price para ler o roadmap e o TODO e trabalhar na próxima etapa do projeto."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "C++ idiomático"
+  short_description: "Revisão e refatoração idiomática de C++17"
+  default_prompt: "Use $cpp-idiomatic para avaliar o código indicado e aplicar melhorias idiomáticas de C++17, explicando as mudanças e verificando o comportamento."

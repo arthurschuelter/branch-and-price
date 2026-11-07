@@ -46,12 +46,44 @@ O teste com Gurobi precisou ser executado fora do sandbox para reconhecer o Host
 
 ## Próxima sessão: concluir inspeção e integrar o PMR
 
-- [ ] Consultar e inspecionar os duais dos clientes e dos dias no exemplo oficial; os métodos estão implementados, mas essa inspeção ainda não foi realizada.
+O esqueleto comentado está em `src/core/branch_and_price.cpp`. Seguir os marcadores
+`TODO [PMR 1]` a `TODO [PMR 10]` na ordem abaixo. São orientações de implementação;
+a inclusão dos comentários não conclui os itens funcionais. Os passos 1, 7 e 8
+foram implementados no teste local do PMR; a integração à árvore continua pendente.
+
+1. Inspecionar os duais do PMR local, conferir objetivo dual e custos reduzidos das colunas disponíveis (`PMR 1a–1b`).
+2. Criar o membro `rmp_` no construtor (`PMR 2`).
+3. Montar e validar uma incumbente unitária antes da primeira otimização (`PMR 3`).
+4. Transferir o teste local de `solve()` para o processamento dos nós e remover o retorno antecipado (`PMR 4`).
+5. Reconstruir o mestre com colunas permitidas, mantendo o mapeamento entre variáveis e índices do pool; garantir viabilidade por grupos (`PMR 5a–5b`).
+6. Resolver com tempo restante, tratar status e repetir as verificações do LP (`PMR 6a–6c`).
+7. Testar integralidade de todos os valores antes de construir `Solution` (`PMR 7–7a`).
+8. Validar a solução inteira e atualizar a incumbente (`PMR 8–8a`).
+9. Distinguir interrupção de inviabilidade/convergência e preservar o nó interrompido (`PMR 9`).
+10. Condicionar podas e fechamento à certificação; em seguida implementar os marcadores `CG 1–6` de geração de colunas (`PMR 10`).
+
+Conferir o PMR unitário do exemplo contra o registro 78 e as 36 colunas, sem
+interpretar esse resultado como LB certificado ou ótimo completo 59. Não habilitar
+a árvore como concluída enquanto `columnGeneration()` ainda retornar provisoriamente.
+
+- [x] Consultar e inspecionar os duais dos clientes e dos dias no exemplo oficial; validar tamanhos, valores finitos, índices não utilizados, sinal dos duais de dia, igualdade primal/dual, custos reduzidos e complementaridade nas colunas disponíveis.
 - [ ] Criar `rmp_` no construtor de `BranchAndPrice` e integrar seu uso ao processamento dos nós; atualmente a validação usa um objeto local em `solve()`.
-- [ ] Substituir o retorno antecipado da validação em `solve()` ao integrar a busca: atualmente `return solution` encerra a execução antes do `while` quando o PMR inicial é ótimo.
-- [ ] Verificar integralidade antes de converter `x` em `Solution`; selecionar `x[k] > 0.5` por si só não valida uma solução inteira geral.
-- [ ] Validar a `Solution` construída: cobertura, dias, capacidade, conflitos e custo recalculado das rotas; as verificações atuais do TODO 7 conferem a solução LP antes dessa conversão.
+- [ ] Substituir o retorno antecipado da validação em `solve()` ao integrar a busca: atualmente `return incumbent_` encerra a execução antes do `while` quando o PMR inicial é ótimo e inteiro.
+- [x] Verificar integralidade de todos os valores antes de converter `x` em `Solution`; no teste local, rejeitar explicitamente um LP fracionário enquanto pricing/branching não estiverem integrados.
+- [x] Validar a `Solution` construída: cobertura, dias, capacidade, conflitos e custos recalculados por `evaluateRoute`; comparar a soma com o objetivo LP e só então atualizar a incumbente.
 - [ ] Tratar explicitamente resultados diferentes de `GRB_OPTIMAL`, mantendo incumbente viável e LB certificado sob interrupção.
+
+Validação dos blocos `GRB_OPTIMAL`: compilação com Gurobi 13.0.2 e execução do
+exemplo oficial com objetivo primal/dual 78. Duais observados: clientes 1 a 6 =
+`(18, 14, 19, 16, 15, 16)`; dias 1 a 6 = `(-9, -5, -3, -2, -1, 0)`.
+Passaram também uma instância de custo zero com depósito 2 e o exemplo com
+depósito 3 (PMR unitário 83, conferido por enumeração das atribuições aos dias).
+Um teste temporário com substituto de `RMPSolver` verificou o caso válido e a
+rejeição de oito casos: tamanho de duais, índice não utilizado, objetivo dual,
+custo reduzido, complementaridade, sinal de dual de dia, variável não finita e LP
+fracionário. Esses testes não validam a árvore nem o pricing ainda pendentes.
+O build foi feito em `/private/tmp/branch-and-price-pmr-build`, pois o cache
+existente de `build/` referencia outro caminho do repositório.
 
 ## Depois: completar a geração de colunas na raiz
 
@@ -66,7 +98,7 @@ O teste com Gurobi precisou ser executado fora do sandbox para reconhecer o Host
 ## Depois: soluções inteiras e ramificação
 
 - [ ] Implementar `isIntegral()` e montar a solução a partir das variáveis do mestre.
-- [ ] Implementar `updateIncumbent()` para guardar soluções de menor custo.
+- [x] Implementar `updateIncumbent()` para guardar soluções validadas de menor custo, com tolerância de `1e-6`; atualmente chamado pelo teste local do PMR.
 - [ ] Implementar `columnAllowed()` respeitando decisões SAME e DIFFERENT.
 - [ ] Implementar `selectBranchingPair()` e criar os filhos em `branch()` com decisões de Ryan-Foster.
 - [ ] Implementar podas por limitante antes e depois do processamento de cada nó.

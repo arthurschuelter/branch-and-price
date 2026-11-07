@@ -4,7 +4,11 @@ project(branch_and_price LANGUAGES CXX)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-option(ENABLE_GUROBI "Build with Gurobi support" OFF)
+option(ENABLE_GUROBI "Build with Gurobi support" ON)
+
+if(NOT ENABLE_GUROBI)
+    message(FATAL_ERROR "This project requires Gurobi. Configure with -DENABLE_GUROBI=ON.")
+endif()
 
 add_executable(bp
     src/main.cpp
@@ -26,6 +30,15 @@ if(ENABLE_GUROBI)
 
     set(GUROBI_HOME "$ENV{GUROBI_HOME}" CACHE PATH "Gurobi installation directory")
     set(GUROBI_VERSION "130" CACHE STRING "Gurobi library version suffix")
+
+    if(NOT GUROBI_HOME AND APPLE)
+        file(GLOB _gurobi_macos_homes LIST_DIRECTORIES true "/Library/gurobi*/macos_universal2")
+        if(_gurobi_macos_homes)
+            list(SORT _gurobi_macos_homes COMPARE NATURAL ORDER DESCENDING)
+            list(GET _gurobi_macos_homes 0 GUROBI_HOME)
+            set(GUROBI_HOME "${GUROBI_HOME}" CACHE PATH "Gurobi installation directory" FORCE)
+        endif()
+    endif()
 
     if(NOT GUROBI_HOME)
         message(FATAL_ERROR "Set GUROBI_HOME to the Gurobi installation directory")
