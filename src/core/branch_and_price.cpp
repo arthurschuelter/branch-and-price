@@ -1,28 +1,19 @@
 #include "branch_and_price.hpp"
-#include <chrono>
-#include <cmath>
-#include <iterator>
-#include <iostream>
-#include <stdexcept>
-#include <utility>
-#include <vector>
+#include "pricing.hpp"
 // #include "instance.hpp"
 // #include "solver_rmp.hpp"
-// #include "pricing.hpp"
 
 BranchAndPrice::BranchAndPrice(const Instance& inst, const Config& cfg)
-    : inst_(inst), cfg_(cfg), rmp_(std::make_shared<RMPSolver>(inst)) {
+    : inst_(inst), 
+      cfg_(cfg), 
+      rmp_(std::make_shared<RMPSolver>(inst)),
+      pricer_(std::make_shared<Pricer>(inst)) {
         this->pool_ = std::vector<Column>();
         this->open_ = std::deque<std::unique_ptr<Node>>();
-    // TODO [CG 1]: criar pricer_ quando a interface e a implementação de Pricer
-    // existirem. A integração do PMR pode ser feita antes dessa etapa.
 }
 
 BranchAndPrice::~BranchAndPrice() = default;
 
-// ---------------------------------------------------------------
-// Laço principal
-// ---------------------------------------------------------------
 Solution BranchAndPrice::buildInitialSolution() const { 
     Solution solution;
     solution.cost = 0.0;
@@ -76,21 +67,24 @@ Solution BranchAndPrice::solve() {
     while (!open_.empty() && !timeIsUp()) {
         auto node = selectNode();
 
-        // TODO [PMR 9]: definir um resultado de processamento que diferencie
-        // interrupção, inviabilidade provada e convergência certificada.
-        // O bool atual não expressa todos esses casos. Em timeout, preservar
-        // este nó na fronteira antes de sair; não descartá-lo no continue.
-
         // Poda por limitante: lb herdado do pai já não melhora o UB?
         // TODO: if (node->lb >= incumbent_.cost - eps) continue;
 
         stats_.nodes++;
-        bool ok = processNode(*node);   // resolve o nó (geração de colunas)
+        const NodeResult result = processNode(*node);   // resolve o nó (geração de colunas)
         logNode(*node);
-        // if (!ok) continue;
-        if (!ok) {
+
+        if (result == NodeResult::Unresolved) {
             pushNode(std::move(node));
             break;
+        }
+
+        if (result == NodeResult::Infeasible) {
+            continue;
+        }
+
+        if (result == NodeResult::Error) {
+            throw std::runtime_error("Erro ao processar nó");
         }
 
         // TODO: depois de processNode, node->lb está atualizado
@@ -118,7 +112,7 @@ Solution BranchAndPrice::solve() {
 }
 
 // Diagnóstico provisório do PMR usando o mapeamento de colunas inseridas.
-Solution BranchAndPrice::validateInitialRmp(
+std::optional<Solution> BranchAndPrice::validateInitialRmp(
     const RMPSolver& rmp, 
     const std::vector<std::size_t>& columnIndices
 ) const {
@@ -179,14 +173,12 @@ Solution BranchAndPrice::validateInitialRmp(
         }
 
         const auto& column = pool_[columnIndices[k]];
-        double reducedCost = column.cost - lambda[column.day];
-        for (int i = 0; i < n; ++i) {
-            if (i != inst_.depot && column.has[i]) reducedCost -= u[i];
-        }
-        if (!std::isfinite(reducedCost) || reducedCost < -eps) {
+
+        const double rc = reducedCost(column, u, lambda);
+        if (!std::isfinite(rc) || rc < -eps) {
             throw std::runtime_error("Custo reduzido negativo no PMR ótimo");
         }
-        if (x[k] > eps && std::abs(reducedCost) > eps) {
+        if (x[k] > eps && std::abs(rc) > eps) {
             throw std::runtime_error("Complementaridade violada no PMR");
         }
     }
@@ -233,9 +225,7 @@ Solution BranchAndPrice::validateInitialRmp(
     }
 
     if (!integral) {
-        throw std::runtime_error(
-            "PMR fracionário: integração com pricing/branching ainda pendente"
-        );
+        return std::nullopt;
     }
 
     Solution solution;
@@ -317,17 +307,8 @@ void BranchAndPrice::initRoot() {
 // ---------------------------------------------------------------
 // Processamento de um nó
 // ---------------------------------------------------------------
-bool BranchAndPrice::processNode(Node& node) {
-    // TODO [PMR 5a]: ampliar os testes da filtragem e do mapeamento.
-    // TODO [PMR 5b]: nos filhos SAME, garantir colunas viáveis com grupos inteiros e dia;
-    // unitárias filtradas podem não bastar. Construir e avaliar a ordem da rota.
-    // Se optar por artificiais, implementar uma fase de viabilidade certificada.
-    // TODO [PMR 6b]: tratar status explicitamente. Ler primais/duais apenas após
-    // GRB_OPTIMAL nesta etapa. TIME_LIMIT preserva incumbente e LB herdado.
-    // GRB_INFEASIBLE do PMR filtrado sozinho não prova inviabilidade do nó.
-    // TODO [PMR 6c]: testar as conferências de cobertura, dias e objetivo
-    // com um PMR filtrado e adaptar o diagnóstico para soluções fracionárias.
-    // Não atribuir objective() a node.lb enquanto não houver certificação.
+NodeResult BranchAndPrice::processNode(Node& node) {
+    // O PMR inviável não prova inviabilidade do nó; não atualizar node.lb sem certificação.
 
     std::vector<int> initialGroup(inst_.vertexCount());
     for (int i = 0; i < inst_.vertexCount(); ++i) {
@@ -335,7 +316,7 @@ bool BranchAndPrice::processNode(Node& node) {
     }
 
     for (const auto& decision : node.decisions) {
-        if (!decision.same) continue;
+        if (!decision.same) { continue; }
 
         int groupI = initialGroup[decision.i];
         int groupJ = initialGroup[decision.j];
@@ -345,9 +326,19 @@ bool BranchAndPrice::processNode(Node& node) {
         }
     }
 
+    for (const auto& decision : node.decisions) {
+        if (decision.same) { continue; }
+
+        if (initialGroup[decision.i] == initialGroup[decision.j]) {
+            std::cerr << "Nó inviável: DIFFERENT dentro de grupo SAME\n";
+            return NodeResult::Infeasible;
+        }
+    }
+
     std::vector<std::vector<int>> groups(inst_.vertexCount());
     for (int i = 0; i < inst_.vertexCount(); ++i) {
-        if (i == inst_.depot) continue;
+        if (i == inst_.depot) { continue; }
+
         groups[initialGroup[i]].push_back(i);
     }
 
@@ -355,13 +346,35 @@ bool BranchAndPrice::processNode(Node& node) {
         if (group.empty()) continue;
 
         const auto evaluation = inst_.evaluateRoute(group, 1);
-
         if (!evaluation.valid) {
             std::cerr << "Grupo SAME inválido: capacidade ou conflito\n";
-            return false;
+            return NodeResult::Infeasible;
+        }
+
+        for (int d = 1; d < inst_.vertexCount(); ++d){
+            Column col;
+            
+            col.route = group;
+            col.day = d;
+            col.has = std::vector<bool>(inst_.vertexCount(), false);
+            for (int i: group) {
+                col.has[i] = true;
+            }
+            col.cost = inst_.evaluateRoute(col.route, d).total_cost;
+
+            bool columnExists = false;
+            for (const Column& p: pool_) {
+                if (p.route == col.route && p.day == col.day) { 
+                    columnExists = true;
+                    break; 
+                }
+            }
+
+            if (!columnExists) {
+                pool_.push_back(col);
+            }
         }
     }
-
 
     this->rmp_->reset();
  
@@ -381,24 +394,26 @@ bool BranchAndPrice::processNode(Node& node) {
     double remainingSeconds = this->cfg_.time_limit - elapsed;
     int grbStatus = this->rmp_->solveLP(remainingSeconds);
     if (grbStatus == GRB_OPTIMAL) {
-        Solution initialSolution = validateInitialRmp(*this->rmp_, columnIndices);
-        updateIncumbent(initialSolution);
+        const auto initialSolution = validateInitialRmp(*this->rmp_, columnIndices);
+        if (initialSolution) { 
+            updateIncumbent(*initialSolution); 
+        }
     }
     else if (grbStatus == GRB_TIME_LIMIT) {
-        // Time limit.
-        return false;
+        // Preserva incumbente e LB.
+        return NodeResult::Unresolved;
     }
     else if (grbStatus == GRB_INFEASIBLE) {
         // PMR inviável.
-        return false;
+        return NodeResult::Unresolved;
     }
     else {
         std::cerr << "Status inesperado do PMR: " << grbStatus << '\n';
-        return false;
+        return NodeResult::Error;
     }
 
     // return columnGeneration(node);
-    return false;
+    return NodeResult::Unresolved;
 }
 
 bool BranchAndPrice::columnGeneration(Node& node) {
@@ -444,11 +459,20 @@ bool BranchAndPrice::columnAllowed(const Column& c, const Node& node) const {
 // Ramificação
 // ---------------------------------------------------------------
 bool BranchAndPrice::isIntegral(double eps) const {
-    // TODO [PMR 7a]: consultar os valores da última solução LP ótima do mestre.
-    // Para cada x, verificar proximidade de 0 ou 1 com eps; rejeitar valores
-    // não finitos ou fora do domínio. Não usar apenas x > 0.5 como teste.
-    // TODO: todos os x_{R,d} estão a eps de 0 ou 1?
-    return false;
+    const auto values = rmp_->values();
+    
+    for (double v: values) {
+        if (!std::isfinite(v)) { throw std::runtime_error("Valor infinito no PMR"); }
+
+        const bool nearZero = std::abs(v) <= eps;
+        const bool nearOne = std::abs(v - 1.0) <= eps;
+
+        if (!nearZero && !nearOne) { 
+            return false; 
+        }
+    }
+
+    return true;
 }
 
 bool BranchAndPrice::selectBranchingPair(int& i, int& j) const {
@@ -511,6 +535,20 @@ void BranchAndPrice::updateIncumbent(const Solution& s) {
     if (std::isfinite(s.cost) && s.cost < incumbent_.cost - 1e-6) {
         incumbent_ = s;
     }
+}
+
+double BranchAndPrice::reducedCost(
+    const Column& column,
+    const std::vector<double>& customerDuals,
+    const std::vector<double>& dayDuals
+) const {
+    double cost = column.cost - dayDuals[column.day];
+
+    for (int customer : column.route) {
+        cost -= customerDuals[customer];
+    }
+
+    return cost;
 }
 
 void BranchAndPrice::logNode(const Node& node) const {

@@ -1,6 +1,12 @@
 #pragma once
 #include <vector>
 #include <deque>
+#include <optional>
+#include <iterator>
+#include <iostream>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -18,6 +24,17 @@ struct Column {
     // TODO: considere guardar um hash/assinatura para detectar colunas duplicadas
 };
 
+enum class PricingStatus {
+    Completed,
+    Interrupted,
+    Error
+};
+
+struct PricingResult {
+    PricingStatus status;
+    std::vector<Column> columns;
+};
+
 // Decisão de ramificação de Ryan-Foster
 struct BranchDecision {
     int i, j;       // par de clientes (i < j)
@@ -31,6 +48,13 @@ struct Node {
     double lb;                              // limitante inferior do nó (valor do PMR)
     std::vector<BranchDecision> decisions;  // caminho da raiz até aqui (todas as decisões)
     // TODO: guardar a solução fracionária? duais para warm start? (decida o que precisa)
+};
+
+enum class NodeResult {
+    Unresolved,
+    Infeasible,
+    Converged,
+    Error
 };
 
 struct Solution {
@@ -83,15 +107,14 @@ public:
 
 private:
     // --- árvore ---
-    Solution validateInitialRmp(const RMPSolver& rmp, const std::vector<std::size_t>& columnIndices) const;
+    std::optional<Solution> validateInitialRmp(const RMPSolver& rmp, const std::vector<std::size_t>& columnIndices) const;
     void initRoot();                                  
     std::unique_ptr<Node> selectNode();               // DFS ou best-bound
     void pushNode(std::unique_ptr<Node> n);
     void updateGlobalLB();                            // LB global = min lb dos nós abertos
 
     // --- processamento de um nó ---
-    // Retorna false se nó inviável / podado
-    bool processNode(Node& node);
+    NodeResult processNode(Node& node);
     bool columnGeneration(Node& node);                // loop: RMP -> pricing -> add cols
     bool columnAllowed(const Column& c, const Node& node) const;  // respeita SAME/DIFF?
 
@@ -99,6 +122,7 @@ private:
     bool isIntegral(double eps = 1e-6) const;         // x_{R,d} todo inteiro?
     bool selectBranchingPair(int& i, int& j) const;   // f_ij mais perto de 0.5 (EXP3)
     void branch(const Node& node, int i, int j);      // cria filhos SAME e DIFFERENT
+    
 
     // --- heurística (-h) ---
     void roundingHeuristic();                         // MIP sobre o pool de colunas
@@ -106,6 +130,11 @@ private:
     // --- utilidades ---
     bool timeIsUp() const;
     Solution buildInitialSolution() const;
+    double reducedCost(
+        const Column& column,
+        const std::vector<double>& customerDuals,
+        const std::vector<double>& dayDuals
+    ) const;
     void updateIncumbent(const Solution& s);
     void logNode(const Node& node) const;             // estatísticas acumuladas em stderr
 
@@ -123,4 +152,6 @@ private:
     std::shared_ptr<RMPSolver> rmp_;
     std::shared_ptr<Pricer> pricer_;
     std::chrono::steady_clock::time_point t0_;
+
+
 };

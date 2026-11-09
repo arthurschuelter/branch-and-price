@@ -14,6 +14,7 @@ add_executable(bp
     src/main.cpp
     src/core/branch_and_price.cpp
     src/core/instance.cpp
+    src/core/pricing.cpp
 )
 
 target_compile_features(bp PRIVATE cxx_std_17)

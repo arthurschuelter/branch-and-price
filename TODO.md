@@ -50,34 +50,47 @@ O esqueleto comentado está em `src/core/branch_and_price.cpp`. Os passos 1, 2,
 3 e 4 foram realizados; os passos 7 e 8 existem no diagnóstico da raiz. A
 integração completa à árvore e a certificação pelo pricing continuam pendentes.
 
-1. Inspecionar os duais do PMR local, conferir objetivo dual e custos reduzidos das colunas disponíveis (`PMR 1a–1b`).
+1. Concluído: inspecionar os duais do PMR, conferir objetivo dual e custos reduzidos das colunas disponíveis (`PMR 1a–1b`).
 2. Concluído: criar o membro `rmp_` no construtor (`PMR 2`).
 3. Concluído: montar e validar uma incumbente unitária antes da primeira otimização (`PMR 3`). No exemplo oficial com `-t 0`, retornou seis rotas unitárias, uma por dia, com custo total 83.
 4. Concluído para o diagnóstico da raiz: transferir o teste de `solve()` para `processNode()` e remover o retorno antecipado (`PMR 4`). O nó ainda permanece aberto sem certificação.
-5. Filtragem, mapeamento e formação de grupos SAME implementados; há uma verificação inicial de capacidade e conflitos pela avaliação da rota, ainda sem testes específicos. Falta tratar decisões DIFFERENT internas, criar colunas dos grupos e ampliar os testes (`PMR 5a–5b`). O usuário verificou a formação transitiva do grupo `{1, 3, 5}`.
-6. Resolver com tempo restante (implementado), completar o tratamento de status e testar as verificações do LP com colunas filtradas (`PMR 6a–6c`).
-7. Testar integralidade de todos os valores antes de construir `Solution` (`PMR 7–7a`).
-8. Validar a solução inteira e atualizar a incumbente (`PMR 8–8a`).
-9. Distinguir interrupção de inviabilidade/convergência e preservar o nó interrompido (`PMR 9`).
+5. Filtragem, mapeamento e formação de grupos SAME implementados. Decisões DIFFERENT internas são detectadas; grupos são avaliados quanto a capacidade e conflitos e recebem colunas para cada dia, sem duplicar sequência/dia. O usuário verificou a filtragem e o mapeamento, incluindo SAME, DIFFERENT e múltiplas decisões, e a formação transitiva do grupo `{1, 3, 5}`. Falta verificar os demais casos dos grupos e a viabilidade do PMR filtrado (`PMR 5b`).
+6. Tempo restante implementado; `GRB_TIME_LIMIT` e `GRB_INFEASIBLE` retornam nó não resolvido. Falta verificar o LP com colunas filtradas (`PMR 6a–6c`).
+7. Implementado: verificar integralidade antes de construir `Solution`; LP fracionário válido retorna `std::nullopt`. `isIntegral()` também consulta e verifica os valores do mestre. Código inspecionado e compilado; falta verificar em execução o caso fracionário e integrar a função à busca após LP ótimo e certificação (`PMR 7–7a`).
+8. Implementado no diagnóstico: validar a solução inteira e atualizar a incumbente somente quando há solução (`PMR 8–8a`).
+9. `NodeResult` declarado, retornado por `processNode()` e tratado em `solve()`; implementação inspecionada e compilada. O resultado de convergência ainda depende do pricing (`PMR 9`).
 10. Condicionar podas e fechamento à certificação; em seguida implementar os marcadores `CG 1–6` de geração de colunas (`PMR 10`).
 
 Conferir o PMR unitário do exemplo contra o registro 78 e as 36 colunas, sem
 interpretar esse resultado como LB certificado ou ótimo completo 59. Não habilitar
 a árvore como concluída enquanto `columnGeneration()` ainda retornar provisoriamente.
 
+### Sequência de trabalho em `processNode()`
+
+1. **PMR 5b:** verificar DIFFERENT interno, capacidade, conflitos, criação e deduplicação das colunas dos grupos e viabilidade do PMR filtrado.
+2. **PMR 6a–6c:** verificar o LP com colunas filtradas. Timeout e PMR inviável preservam o nó como não resolvido; inviabilidade do PMR filtrado não certifica inviabilidade do nó.
+3. **PMR 7–8:** validação primal/dual ocorre antes da construção condicional de solução inteira; o código aceita LP fracionário válido e atualiza a incumbente apenas para solução inteira validada. Verificar o comportamento fracionário após a alteração; as duas partes ainda estão na mesma função.
+4. **PMR 9:** `solve()` trata os resultados atuais de `processNode()`; falta integrar a convergência certificada ao pricing e verificar os casos em execução.
+5. **PMR 10:** condicionar podas e fechamento à certificação. Concluir essa etapa após implementar o ciclo de geração de colunas e o pricing exato (`CG 1–6`).
+
 - [x] Consultar e inspecionar os duais dos clientes e dos dias no exemplo oficial; validar tamanhos, valores finitos, índices não utilizados, sinal dos duais de dia, igualdade primal/dual, custos reduzidos e complementaridade nas colunas disponíveis.
 - [x] Criar `rmp_` no construtor e usá-lo no diagnóstico do PMR da raiz em `processNode()`.
 - [x] Remover o retorno antecipado da validação em `solve()`; o nó não certificado é devolvido à fronteira.
-- [x] Verificar integralidade de todos os valores antes de converter `x` em `Solution`; no teste local, rejeitar explicitamente um LP fracionário enquanto pricing/branching não estiverem integrados.
+- [x] Verificar integralidade de todos os valores antes de converter `x` em `Solution`; retornar `std::nullopt` para LP fracionário válido, sem atualizar a incumbente. Alteração inspecionada e compilada.
+- [ ] Verificar em execução o retorno para LP fracionário após a alteração.
 - [x] Validar a `Solution` construída: cobertura, dias, capacidade, conflitos e custos recalculados por `evaluateRoute`; comparar a soma com o objetivo LP e só então atualizar a incumbente.
-- [ ] Tratar explicitamente resultados diferentes de `GRB_OPTIMAL`, mantendo incumbente viável e LB certificado sob interrupção.
+- [x] Inspecionar o tratamento provisório de `GRB_TIME_LIMIT` e `GRB_INFEASIBLE`: o nó retorna à fronteira sem alterar incumbente ou LB.
+- [x] Declarar `NodeResult` com resultados para nó não resolvido, inviável, convergido e erro; inspecionado e compilado.
+- [x] Retornar `NodeResult` em `processNode()`: inviabilidade comprovada, nó não resolvido ou erro; inspeção do código, integração ainda pendente.
+- [x] Tratar `NodeResult` em `solve()`: preservar nó não resolvido, descartar nó inviável e sinalizar erro; inspecionado e compilado.
+- [ ] Verificar os resultados em execução e integrar convergência certificada ao pricing (PMR 9).
 
 Validação dos blocos `GRB_OPTIMAL`: compilação com Gurobi 13.0.2 e execução do
 exemplo oficial com objetivo primal/dual 78. Duais observados: clientes 1 a 6 =
 `(18, 14, 19, 16, 15, 16)`; dias 1 a 6 = `(-9, -5, -3, -2, -1, 0)`.
 Passaram também uma instância de custo zero com depósito 2 e o exemplo com
 depósito 3 (PMR unitário 83, conferido por enumeração das atribuições aos dias).
-Um teste temporário com substituto de `RMPSolver` verificou o caso válido e a
+Antes da alteração para `std::optional`, um teste temporário com substituto de `RMPSolver` verificou o caso válido e a
 rejeição de oito casos: tamanho de duais, índice não utilizado, objetivo dual,
 custo reduzido, complementaridade, sinal de dual de dia, variável não finita e LP
 fracionário. Esses testes não validam a árvore nem o pricing ainda pendentes.
@@ -86,8 +99,36 @@ existente de `build/` referencia outro caminho do repositório.
 
 ## Depois: completar a geração de colunas na raiz
 
-- [ ] Criar `pricer_` no construtor de `BranchAndPrice`.
-- [ ] Implementar `processNode()` para montar o PMR com as colunas permitidas e garantir viabilidade conforme a Fase 3.1 do roadmap; se optar por artificiais, usar uma fase de viabilidade certificada.
+- [x] Declarar `reducedCost()` na parte privada de `BranchAndPrice`; declaração inspecionada e compilada.
+- [x] Implementar `reducedCost()` para coluna válida e duais indexados por cliente e dia; inspecionado e compilado.
+- [x] Reutilizar `reducedCost()` no diagnóstico do PMR; compilação e execução do exemplo oficial passaram nas verificações das 36 colunas, com objetivo primal/dual 78.
+- [x] Declarar `PricingStatus` e `PricingResult` para representar status e colunas do pricing; inspecionado e compilado.
+- [x] Declarar a interface do `Pricer`, distinguindo pricing heurístico e exato, decisões do nó e tempo disponível; header verificado com compilação de sintaxe.
+- [x] Implementar o construtor de `Pricer` e incluir `pricing.cpp` no CMake; inspecionado e compilado.
+- [x] Criar esqueleto de `Pricer::exact()` com retorno provisório `Interrupted`; inspecionado e compilado.
+- [ ] Implementar pricing exato para todos os dias, decisões do nó e eliminação de subciclos; certificar ausência de colunas melhorantes apenas após conclusão exata.
+- [ ] Implementar os métodos do `Pricer` e integrar sua interface ao ciclo de geração de colunas.
+- [x] Criar `pricer_` no construtor de `BranchAndPrice`; inspecionado e compilado.
+- [x] Criar esqueleto compilável de `Pricer::heuristic()` que retorna interrupção para tempo esgotado.
+- [x] Formar identificadores transitivos para decisões SAME em `Pricer::heuristic()`; inspecionado e compilado.
+- [x] Montar listas dos clientes em cada grupo SAME, excluindo o depósito; inspecionado e compilado.
+- [x] Detectar decisões DIFFERENT dentro de grupo SAME na heurística e sinalizar erro; inspecionado e compilado.
+- [x] Percorrer grupos por dia e avaliar rotas iniciais quanto a capacidade e conflitos; inspecionado e compilado.
+- [x] Montar colunas iniciais de grupos com rota, dia, custo e vetor de presença coerentes; inspecionado e compilado. Ainda não são retornadas.
+- [x] Construir candidatas combinando dois grupos, verificar capacidade, conflitos e decisões DIFFERENT e calcular custo reduzido; inspecionado e compilado.
+- [x] Selecionar e guardar candidatas de custo reduzido negativo com tolerância; inspecionado e compilado.
+- [x] Retornar colunas encontradas no encerramento e na interrupção; inspecionado e compilado.
+- [x] Verificar tempo em cada iteração do laço de combinações; inspecionado e compilado.
+- [x] Verificar tempo antes de avaliar cada grupo inicial; inspecionado e compilado.
+- [x] Verificar tempo entre decisões na formação dos grupos SAME; inspecionado e compilado.
+- [x] Incluir diretamente `<chrono>` e `<utility>` em `pricing.cpp`; inspecionado e compilado.
+- [x] Validar tamanhos dos vetores de duais antes de acessá-los; inspecionado e compilado.
+- [x] Validar valores finitos dos duais; inspecionado e compilado.
+- [x] Validar índices das decisões antes de acessar os grupos; inspecionado e compilado.
+- [ ] Ampliar verificações de tempo nas demais etapas da heurística.
+- [ ] Implementar construção de rotas e controle de tempo durante a busca heurística.
+- [x] Montar o PMR com colunas permitidas e acrescentar colunas dos grupos SAME por dia; implementação inspecionada, com verificações específicas dos grupos pendentes.
+- [ ] Completar o processamento do nó e garantir viabilidade conforme a Fase 3.1 do roadmap; se optar por artificiais, usar uma fase de viabilidade certificada.
 - [ ] Remover o `return true` provisório no início de `columnGeneration()` ao implementar o ciclo.
 - [ ] Implementar pricing heurístico seguido de pricing exato quando a heurística não encontrar coluna de custo reduzido negativo.
 - [ ] Implementar `columnGeneration()`: resolver o LP, extrair duais, executar pricing e adicionar novas colunas sem duplicação.
@@ -96,10 +137,11 @@ existente de `build/` referencia outro caminho do repositório.
 
 ## Depois: soluções inteiras e ramificação
 
-- [ ] Implementar `isIntegral()` e montar a solução a partir das variáveis do mestre.
+- [x] Implementar `isIntegral()` com tolerância e verificação de valores finitos; inspecionado e compilado.
+- [ ] Integrar `isIntegral()` à busca somente após LP ótimo; condicionar fechamento do nó à certificação e montar a solução a partir das variáveis do mestre.
 - [x] Implementar `updateIncumbent()` para guardar soluções validadas de menor custo, com tolerância de `1e-6`; atualmente chamado pelo teste local do PMR.
 - [x] Implementar `columnAllowed()` respeitando decisões SAME e DIFFERENT (inspeção do código).
-- [ ] Testar `columnAllowed()` com as combinações de presença dos clientes e múltiplas decisões; a filtragem e o mapeamento no PMR estão implementados, mas ainda não foram testados com decisões.
+- [x] Verificar `columnAllowed()` para SAME, DIFFERENT e múltiplas decisões, além da filtragem e do mapeamento no PMR com decisões.
 - [ ] Implementar `selectBranchingPair()` e criar os filhos em `branch()` com decisões de Ryan-Foster.
 - [ ] Implementar podas por limitante antes e depois do processamento de cada nó.
 - [ ] Adicionar seleção por melhor limitante em `selectNode()`.
