@@ -2,17 +2,18 @@
 #include <chrono>
 #include <cmath>
 #include <iterator>
+#include <iostream>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 // #include "instance.hpp"
 // #include "solver_rmp.hpp"
 // #include "pricing.hpp"
 
 BranchAndPrice::BranchAndPrice(const Instance& inst, const Config& cfg)
-    : inst_(inst), cfg_(cfg) {
+    : inst_(inst), cfg_(cfg), rmp_(std::make_shared<RMPSolver>(inst)) {
         this->pool_ = std::vector<Column>();
         this->open_ = std::deque<std::unique_ptr<Node>>();
-    // TODO [PMR 2]: criar rmp_ com std::make_shared<RMPSolver>(inst_).
-    // Usar este membro em todos os nós; reset() reconstrói o modelo de cada nó.
     // TODO [CG 1]: criar pricer_ quando a interface e a implementação de Pricer
     // existirem. A integração do PMR pode ser feita antes dessa etapa.
 }
@@ -22,189 +23,52 @@ BranchAndPrice::~BranchAndPrice() = default;
 // ---------------------------------------------------------------
 // Laço principal
 // ---------------------------------------------------------------
+Solution BranchAndPrice::buildInitialSolution() const { 
+    Solution solution;
+    solution.cost = 0.0;
 
+    int day = 1;
+    for (int v = 0; v < inst_.vertexCount(); ++v) {
+        if (v == inst_.depot) { continue; }
+
+        const Column* selected = nullptr;
+
+        for (const Column& column : pool_) {
+            if (column.day == day &&
+                column.route.size() == 1 &&
+                column.route[0] == v) {
+                selected = &column;
+                break;
+            }
+        }
+        if (selected == nullptr) {
+            throw std::runtime_error("Coluna unitária inicial não encontrada");
+        }
+
+        const auto evaluation = inst_.evaluateRoute(selected->route, selected->day);
+        if (!evaluation.valid) {
+            throw std::runtime_error("Rota inicial inválida");
+        }
+        if (!std::isfinite(selected->cost) ||
+            std::abs(selected->cost - evaluation.total_cost) > 1e-6) {
+            throw std::runtime_error("Custo da coluna inicial inconsistente");
+        }
+
+        solution.columns.push_back(*selected);
+        solution.cost += evaluation.total_cost;
+        
+        ++day;
+    }
+
+    return solution;
+}
 
 Solution BranchAndPrice::solve() {
     t0_ = std::chrono::steady_clock::now();
     initRoot();
-
-    // ESQUELETO DA PRÓXIMA ETAPA — seguir PMR 1 a 10, nesta ordem.
-    // A inspeção dos duais do teste local está implementada no bloco GRB_OPTIMAL.
-    // TODO [PMR 3]: construir uma incumbente inicial: escolher uma coluna
-    // unitária por cliente, atribuindo dias distintos 1..n-1. Validar as rotas,
-    // cobertura, dias e custo antes de guardá-la; manter global_lb_ = 0.
-    // Assim, timeout antes do primeiro LP ainda permite devolver solução viável.
-    // TODO [PMR 4]: depois da inspeção, mover montagem/solução do mestre local
-    // para processNode(), usando rmp_. Remover este bloco de diagnóstico inteiro,
-    // incluindo seu retorno antecipado, para alcançar o laço da árvore.
-    RMPSolver rmp(this->inst_);
- 
-    for (const auto& column : this->pool_) {
-        rmp.addColumn(column);
-    }
-
-    double elapsed = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - this->t0_
-    ).count();
-
-    double remainingSeconds = this->cfg_.time_limit - elapsed;
-    int grbStatus = rmp.solveLP(remainingSeconds);
-    if (grbStatus == GRB_OPTIMAL) {
-        constexpr double eps = 1e-6;
-        const int n = inst_.vertexCount();
-        const double lpObjective = rmp.objective();
-        const auto x = rmp.values();
-        const auto u = rmp.customerDuals();
-        const auto lambda = rmp.dayDuals();
-
-        if (!std::isfinite(lpObjective)) {
-            throw std::runtime_error("Objetivo do PMR não finito");
-        }
-        if (x.size() != this->pool_.size()) {
-            throw std::runtime_error(
-                "Quantidade de valores diferente da quantidade de colunas"
-            );
-        }
-
-        if (u.size() != static_cast<std::size_t>(n) ||
-            lambda.size() != static_cast<std::size_t>(n)) {
-            throw std::runtime_error("Tamanho incorreto dos vetores de duais");
-        }
-        for (int i = 0; i < n; ++i) {
-            if (!std::isfinite(u[i]) || !std::isfinite(lambda[i])) {
-                throw std::runtime_error("Dual não finito");
-            }
-        }
-        if (std::abs(u[inst_.depot]) > eps || std::abs(lambda[0]) > eps) {
-            throw std::runtime_error("Dual não utilizado deve ser zero");
-        }
-
-        double dualObjective = 0.0;
-        for (int i = 0; i < n; ++i) {
-            if (i == inst_.depot) continue;
-            std::cerr << "u[" << i << "] = " << u[i] << '\n';
-            dualObjective += u[i];
-        }
-        for (int d = 1; d < n; ++d) {
-            std::cerr << "lambda[" << d << "] = " << lambda[d] << '\n';
-            if (lambda[d] > eps) {
-                throw std::runtime_error("Dual de dia positivo");
-            }
-            dualObjective += lambda[d];
-        }
-        if (!std::isfinite(dualObjective) ||
-            std::abs(dualObjective - lpObjective) > eps) {
-            throw std::runtime_error("Objetivos primal e dual do PMR diferem");
-        }
-
-        bool integral = true;
-        for (std::size_t k = 0; k < x.size(); ++k) {
-            if (!std::isfinite(x[k]) || x[k] < -eps || x[k] > 1.0 + eps) {
-                throw std::runtime_error("Valor de variável do PMR inválido");
-            }
-            if (std::abs(x[k]) > eps && std::abs(x[k] - 1.0) > eps) {
-                integral = false;
-            }
-
-            const auto& column = pool_[k];
-            double reducedCost = column.cost - lambda[column.day];
-            for (int i = 0; i < n; ++i) {
-                if (i != inst_.depot && column.has[i]) reducedCost -= u[i];
-            }
-            if (!std::isfinite(reducedCost) || reducedCost < -eps) {
-                throw std::runtime_error("Custo reduzido negativo no PMR ótimo");
-            }
-            if (x[k] > eps && std::abs(reducedCost) > eps) {
-                throw std::runtime_error("Complementaridade violada no PMR");
-            }
-        }
-        std::cerr << "PMR: objetivo primal = " << lpObjective
-                  << ", dual = " << dualObjective
-                  << "; custos reduzidos conferidos em " << x.size()
-                  << " colunas (sem certificação do mestre completo).\n";
-        
-        for (int v = 0; v < this->inst_.vertexCount(); ++v) {
-            if (v == this->inst_.depot) { continue; }
-
-            double sum = 0.0;
-            for (std::size_t k = 0; k < x.size(); ++k) {
-                if (this->pool_[k].has[v]) {
-                    sum += x[k];
-                }
-            }
-
-            if (std::abs(sum - 1.0) > 1e-6) {
-                throw std::runtime_error("Cobertura incorreta de cliente");
-            }
-        }
-
-        // Conferir o limite de uma rota por dia, com tolerância 1e-6.
-        for (int d = 1; d < this->inst_.vertexCount(); ++d) {
-            double sum = 0.0;
-            for (std::size_t k = 0; k < x.size(); ++k) {
-                if (this->pool_[k].day == d) {
-                    sum += x[k];
-                }
-            }
-
-            if (sum > 1.0 + 1e-6) {
-                throw std::runtime_error("Limite de rotas por dia violado");
-            }
-        }
-
-        double objective = 0.0;
-        for (std::size_t k = 0; k < x.size(); ++k) {
-            objective += this->pool_[k].cost * x[k];
-        }
-
-        if (!std::isfinite(objective) || std::abs(objective - lpObjective) > eps) {
-            throw std::runtime_error("Objetivo do PMR inconsistente");
-        }
-
-        // O teste local ainda não tem pricing/branching integrado. Impedir que
-        // um LP fracionário seja convertido ou enviado para a árvore provisória.
-        if (!integral) {
-            throw std::runtime_error(
-                "PMR fracionário: integração com pricing/branching ainda pendente"
-            );
-        }
-
-        Solution solution;
-        solution.cost = 0.0;
-        std::vector<int> coverage(n, 0);
-        std::vector<bool> usedDays(n, false);
-        for (std::size_t k = 0; k < x.size(); ++k) {
-            if (x[k] > 0.5) {
-                const auto& column = pool_[k];
-                const auto evaluation = inst_.evaluateRoute(column.route, column.day);
-                if (!evaluation.valid) {
-                    throw std::runtime_error("Rota inválida na solução inteira");
-                }
-                if (!std::isfinite(column.cost) ||
-                    std::abs(column.cost - evaluation.total_cost) > eps) {
-                    throw std::runtime_error("Custo de coluna difere do custo da rota");
-                }
-                if (usedDays[column.day]) {
-                    throw std::runtime_error("Dia repetido na solução inteira");
-                }
-                usedDays[column.day] = true;
-                for (int customer : column.route) ++coverage[customer];
-                solution.cost += evaluation.total_cost;
-                solution.columns.push_back(column);
-            }
-        } 
-
-        for (int i = 0; i < n; ++i) {
-            if (coverage[i] != (i == inst_.depot ? 0 : 1)) {
-                throw std::runtime_error("Cobertura incorreta na solução inteira");
-            }
-        }
-        if (std::abs(solution.cost - lpObjective) > eps) {
-            throw std::runtime_error("Custo da solução inteira difere do objetivo LP");
-        }
-        updateIncumbent(solution);
-        return incumbent_;
-    }
+    
+    Solution initial = buildInitialSolution();
+    updateIncumbent(initial);
 
     // this->printOpen();
     // this->printPool();
@@ -222,7 +86,12 @@ Solution BranchAndPrice::solve() {
 
         stats_.nodes++;
         bool ok = processNode(*node);   // resolve o nó (geração de colunas)
-        if (!ok) continue;              // inviável ou podado
+        logNode(*node);
+        // if (!ok) continue;
+        if (!ok) {
+            pushNode(std::move(node));
+            break;
+        }
 
         // TODO: depois de processNode, node->lb está atualizado
         // TODO: poda por limitante de novo (lb >= UB)
@@ -246,6 +115,165 @@ Solution BranchAndPrice::solve() {
     if (!open_.empty()) roundingHeuristic();   // -h
     // TODO: preencher stats_.time_total
     return incumbent_;
+}
+
+// Diagnóstico provisório do PMR usando o mapeamento de colunas inseridas.
+Solution BranchAndPrice::validateInitialRmp(
+    const RMPSolver& rmp, 
+    const std::vector<std::size_t>& columnIndices
+) const {
+    constexpr double eps = 1e-6;
+    const int n = inst_.vertexCount();
+    const double lpObjective = rmp.objective();
+    const auto x = rmp.values();
+    const auto u = rmp.customerDuals();
+    const auto lambda = rmp.dayDuals();
+
+    if (!std::isfinite(lpObjective)) {
+        throw std::runtime_error("Objetivo do PMR não finito");
+    }
+    if (x.size() != columnIndices.size()) {
+        throw std::runtime_error(
+            "Quantidade de valores diferente da quantidade de colunas"
+        );
+    }
+
+    if (u.size() != static_cast<std::size_t>(n) ||
+        lambda.size() != static_cast<std::size_t>(n)) {
+        throw std::runtime_error("Tamanho incorreto dos vetores de duais");
+    }
+    for (int i = 0; i < n; ++i) {
+        if (!std::isfinite(u[i]) || !std::isfinite(lambda[i])) {
+            throw std::runtime_error("Dual não finito");
+        }
+    }
+    if (std::abs(u[inst_.depot]) > eps || std::abs(lambda[0]) > eps) {
+        throw std::runtime_error("Dual não utilizado deve ser zero");
+    }
+
+    double dualObjective = 0.0;
+    for (int i = 0; i < n; ++i) {
+        if (i == inst_.depot) continue;
+        std::cerr << "u[" << i << "] = " << u[i] << '\n';
+        dualObjective += u[i];
+    }
+    for (int d = 1; d < n; ++d) {
+        std::cerr << "lambda[" << d << "] = " << lambda[d] << '\n';
+        if (lambda[d] > eps) {
+            throw std::runtime_error("Dual de dia positivo");
+        }
+        dualObjective += lambda[d];
+    }
+    if (!std::isfinite(dualObjective) ||
+        std::abs(dualObjective - lpObjective) > eps) {
+        throw std::runtime_error("Objetivos primal e dual do PMR diferem");
+    }
+
+    bool integral = true;
+    for (std::size_t k = 0; k < x.size(); ++k) {
+        if (!std::isfinite(x[k]) || x[k] < -eps || x[k] > 1.0 + eps) {
+            throw std::runtime_error("Valor de variável do PMR inválido");
+        }
+        if (std::abs(x[k]) > eps && std::abs(x[k] - 1.0) > eps) {
+            integral = false;
+        }
+
+        const auto& column = pool_[columnIndices[k]];
+        double reducedCost = column.cost - lambda[column.day];
+        for (int i = 0; i < n; ++i) {
+            if (i != inst_.depot && column.has[i]) reducedCost -= u[i];
+        }
+        if (!std::isfinite(reducedCost) || reducedCost < -eps) {
+            throw std::runtime_error("Custo reduzido negativo no PMR ótimo");
+        }
+        if (x[k] > eps && std::abs(reducedCost) > eps) {
+            throw std::runtime_error("Complementaridade violada no PMR");
+        }
+    }
+    std::cerr << "PMR: objetivo primal = " << lpObjective
+              << ", dual = " << dualObjective
+              << "; custos reduzidos conferidos em " << x.size()
+              << " colunas (sem certificação do mestre completo).\n";
+
+    for (int v = 0; v < this->inst_.vertexCount(); ++v) {
+        if (v == this->inst_.depot) { continue; }
+
+        double sum = 0.0;
+        for (std::size_t k = 0; k < x.size(); ++k) {
+            if (this->pool_[columnIndices[k]].has[v]) {
+                sum += x[k];
+            }
+        }
+
+        if (std::abs(sum - 1.0) > 1e-6) {
+            throw std::runtime_error("Cobertura incorreta de cliente");
+        }
+    }
+
+    for (int d = 1; d < this->inst_.vertexCount(); ++d) {
+        double sum = 0.0;
+        for (std::size_t k = 0; k < x.size(); ++k) {
+            if (this->pool_[columnIndices[k]].day == d) {
+                sum += x[k];
+            }
+        }
+
+        if (sum > 1.0 + 1e-6) {
+            throw std::runtime_error("Limite de rotas por dia violado");
+        }
+    }
+
+    double objective = 0.0;
+    for (std::size_t k = 0; k < x.size(); ++k) {
+        objective += this->pool_[columnIndices[k]].cost * x[k];
+    }
+
+    if (!std::isfinite(objective) || std::abs(objective - lpObjective) > eps) {
+        throw std::runtime_error("Objetivo do PMR inconsistente");
+    }
+
+    if (!integral) {
+        throw std::runtime_error(
+            "PMR fracionário: integração com pricing/branching ainda pendente"
+        );
+    }
+
+    Solution solution;
+    solution.cost = 0.0;
+    std::vector<int> coverage(n, 0);
+    std::vector<bool> usedDays(n, false);
+    for (std::size_t k = 0; k < x.size(); ++k) {
+        if (x[k] > 0.5) {
+            const auto& column = pool_[columnIndices[k]];
+            const auto evaluation = inst_.evaluateRoute(column.route, column.day);
+            if (!evaluation.valid) {
+                throw std::runtime_error("Rota inválida na solução inteira");
+            }
+            if (!std::isfinite(column.cost) ||
+                std::abs(column.cost - evaluation.total_cost) > eps) {
+                throw std::runtime_error("Custo de coluna difere do custo da rota");
+            }
+            if (usedDays[column.day]) {
+                throw std::runtime_error("Dia repetido na solução inteira");
+            }
+            usedDays[column.day] = true;
+            for (int customer : column.route) ++coverage[customer];
+            solution.cost += evaluation.total_cost;
+
+
+            solution.columns.push_back(column);
+        }
+    }
+
+    for (int i = 0; i < n; ++i) {
+        if (coverage[i] != (i == inst_.depot ? 0 : 1)) {
+            throw std::runtime_error("Cobertura incorreta na solução inteira");
+        }
+    }
+    if (std::abs(solution.cost - lpObjective) > eps) {
+        throw std::runtime_error("Custo da solução inteira difere do objetivo LP");
+    }
+    return solution;
 }
 
 void BranchAndPrice::initRoot() {
@@ -282,7 +310,7 @@ void BranchAndPrice::initRoot() {
     root->id = 0;
     root->depth = 0;
     root->lb = -std::numeric_limits<double>::infinity()/2;
-    
+
     this->pushNode(std::move(root));
 }
 
@@ -290,23 +318,87 @@ void BranchAndPrice::initRoot() {
 // Processamento de um nó
 // ---------------------------------------------------------------
 bool BranchAndPrice::processNode(Node& node) {
-    // TODO [PMR 5a]: chamar rmp_->reset(); percorrer pool_ e inserir somente
-    // colunas para as quais columnAllowed(c, node) seja verdadeiro.
-    // Manter um vetor com os índices dessas colunas no pool_ na ordem de inserção:
-    // depois da filtragem, o índice de rmp_->values() NÃO é o índice do pool_.
-    // TODO [PMR 5b]: na raiz, conferir 36 colunas e 12 restrições do exemplo.
-    // Nos filhos SAME, garantir colunas viáveis com grupos inteiros e dia;
+    // TODO [PMR 5a]: ampliar os testes da filtragem e do mapeamento.
+    // TODO [PMR 5b]: nos filhos SAME, garantir colunas viáveis com grupos inteiros e dia;
     // unitárias filtradas podem não bastar. Construir e avaliar a ordem da rota.
     // Se optar por artificiais, implementar uma fase de viabilidade certificada.
-    // TODO [PMR 6a]: calcular restante = cfg_.time_limit - segundos desde t0_
-    // imediatamente antes de solveLP(restante), sem reiniciar o relógio por nó.
     // TODO [PMR 6b]: tratar status explicitamente. Ler primais/duais apenas após
     // GRB_OPTIMAL nesta etapa. TIME_LIMIT preserva incumbente e LB herdado.
     // GRB_INFEASIBLE do PMR filtrado sozinho não prova inviabilidade do nó.
-    // TODO [PMR 6c]: reutilizar as conferências de cobertura, dias e objetivo
-    // do teste local de solve(), usando o mapeamento de índices acima.
+    // TODO [PMR 6c]: testar as conferências de cobertura, dias e objetivo
+    // com um PMR filtrado e adaptar o diagnóstico para soluções fracionárias.
     // Não atribuir objective() a node.lb enquanto não houver certificação.
-    return columnGeneration(node);
+
+    std::vector<int> initialGroup(inst_.vertexCount());
+    for (int i = 0; i < inst_.vertexCount(); ++i) {
+        initialGroup[i] = i;
+    }
+
+    for (const auto& decision : node.decisions) {
+        if (!decision.same) continue;
+
+        int groupI = initialGroup[decision.i];
+        int groupJ = initialGroup[decision.j];
+
+        for (int& g : initialGroup) {
+            if (g == groupJ) { g = groupI; }
+        }
+    }
+
+    std::vector<std::vector<int>> groups(inst_.vertexCount());
+    for (int i = 0; i < inst_.vertexCount(); ++i) {
+        if (i == inst_.depot) continue;
+        groups[initialGroup[i]].push_back(i);
+    }
+
+    for (const auto& group : groups) {
+        if (group.empty()) continue;
+
+        const auto evaluation = inst_.evaluateRoute(group, 1);
+
+        if (!evaluation.valid) {
+            std::cerr << "Grupo SAME inválido: capacidade ou conflito\n";
+            return false;
+        }
+    }
+
+
+    this->rmp_->reset();
+ 
+    std::vector<std::size_t> columnIndices;
+    for (std::size_t i = 0; i < this->pool_.size(); ++i) {
+        if (!this->columnAllowed(this->pool_[i], node)) { continue; }
+
+        this->rmp_->addColumn(this->pool_[i]);
+        columnIndices.push_back(i);
+    }
+
+    double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - this->t0_
+    ).count();
+
+
+    double remainingSeconds = this->cfg_.time_limit - elapsed;
+    int grbStatus = this->rmp_->solveLP(remainingSeconds);
+    if (grbStatus == GRB_OPTIMAL) {
+        Solution initialSolution = validateInitialRmp(*this->rmp_, columnIndices);
+        updateIncumbent(initialSolution);
+    }
+    else if (grbStatus == GRB_TIME_LIMIT) {
+        // Time limit.
+        return false;
+    }
+    else if (grbStatus == GRB_INFEASIBLE) {
+        // PMR inviável.
+        return false;
+    }
+    else {
+        std::cerr << "Status inesperado do PMR: " << grbStatus << '\n';
+        return false;
+    }
+
+    // return columnGeneration(node);
+    return false;
 }
 
 bool BranchAndPrice::columnGeneration(Node& node) {
@@ -339,8 +431,11 @@ bool BranchAndPrice::columnGeneration(Node& node) {
 
 bool BranchAndPrice::columnAllowed(const Column& c, const Node& node) const {
     for (const auto& d : node.decisions) {
-        // TODO: SAME      -> coluna tem ambos ou nenhum dos dois
-        // TODO: DIFFERENT -> coluna não tem os dois juntos
+        bool hasI = c.has[d.i];
+        bool hasJ = c.has[d.j];
+
+        if (d.same && hasI != hasJ){ return false; }
+        if (!d.same && hasI && hasJ){ return false; }
     }
     return true;
 }
@@ -413,14 +508,29 @@ bool BranchAndPrice::timeIsUp() const {
 }
 
 void BranchAndPrice::updateIncumbent(const Solution& s) {
-    // O chamador valida a solução antes de propor uma nova incumbente.
     if (std::isfinite(s.cost) && s.cost < incumbent_.cost - 1e-6) {
         incumbent_ = s;
     }
 }
 
 void BranchAndPrice::logNode(const Node& node) const {
-    // TODO: imprimir no stderr nó, lb, ub, duais (útil p/ conferir o exemplo à mão)
+    const double elapsed = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0_
+    ).count();
+
+    std::cerr << "no=" << node.id << " profundidade=" << node.depth
+              << " lb_no=" << node.lb << " lb_global=" << global_lb_
+              << " ub=";
+    if (incumbent_.cost < 1e18) {
+        std::cerr << incumbent_.cost;
+    } else {
+        std::cerr << "indisponivel";
+    }
+    std::cerr << " colunas_pool=" << pool_.size()
+              << " colunas_geradas=" << stats_.columns_generated
+              << " pricing_heuristico=" << stats_.heuristic_pricing_calls
+              << " pricing_exato=" << stats_.exact_pricing_calls
+              << " tempo_s=" << elapsed << '\n';
 }
 
 void BranchAndPrice::printPool() {

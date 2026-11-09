@@ -46,17 +46,16 @@ O teste com Gurobi precisou ser executado fora do sandbox para reconhecer o Host
 
 ## Próxima sessão: concluir inspeção e integrar o PMR
 
-O esqueleto comentado está em `src/core/branch_and_price.cpp`. Seguir os marcadores
-`TODO [PMR 1]` a `TODO [PMR 10]` na ordem abaixo. São orientações de implementação;
-a inclusão dos comentários não conclui os itens funcionais. Os passos 1, 7 e 8
-foram implementados no teste local do PMR; a integração à árvore continua pendente.
+O esqueleto comentado está em `src/core/branch_and_price.cpp`. Os passos 1, 2,
+3 e 4 foram realizados; os passos 7 e 8 existem no diagnóstico da raiz. A
+integração completa à árvore e a certificação pelo pricing continuam pendentes.
 
 1. Inspecionar os duais do PMR local, conferir objetivo dual e custos reduzidos das colunas disponíveis (`PMR 1a–1b`).
-2. Criar o membro `rmp_` no construtor (`PMR 2`).
-3. Montar e validar uma incumbente unitária antes da primeira otimização (`PMR 3`).
-4. Transferir o teste local de `solve()` para o processamento dos nós e remover o retorno antecipado (`PMR 4`).
-5. Reconstruir o mestre com colunas permitidas, mantendo o mapeamento entre variáveis e índices do pool; garantir viabilidade por grupos (`PMR 5a–5b`).
-6. Resolver com tempo restante, tratar status e repetir as verificações do LP (`PMR 6a–6c`).
+2. Concluído: criar o membro `rmp_` no construtor (`PMR 2`).
+3. Concluído: montar e validar uma incumbente unitária antes da primeira otimização (`PMR 3`). No exemplo oficial com `-t 0`, retornou seis rotas unitárias, uma por dia, com custo total 83.
+4. Concluído para o diagnóstico da raiz: transferir o teste de `solve()` para `processNode()` e remover o retorno antecipado (`PMR 4`). O nó ainda permanece aberto sem certificação.
+5. Filtragem, mapeamento e formação de grupos SAME implementados; há uma verificação inicial de capacidade e conflitos pela avaliação da rota, ainda sem testes específicos. Falta tratar decisões DIFFERENT internas, criar colunas dos grupos e ampliar os testes (`PMR 5a–5b`). O usuário verificou a formação transitiva do grupo `{1, 3, 5}`.
+6. Resolver com tempo restante (implementado), completar o tratamento de status e testar as verificações do LP com colunas filtradas (`PMR 6a–6c`).
 7. Testar integralidade de todos os valores antes de construir `Solution` (`PMR 7–7a`).
 8. Validar a solução inteira e atualizar a incumbente (`PMR 8–8a`).
 9. Distinguir interrupção de inviabilidade/convergência e preservar o nó interrompido (`PMR 9`).
@@ -67,8 +66,8 @@ interpretar esse resultado como LB certificado ou ótimo completo 59. Não habil
 a árvore como concluída enquanto `columnGeneration()` ainda retornar provisoriamente.
 
 - [x] Consultar e inspecionar os duais dos clientes e dos dias no exemplo oficial; validar tamanhos, valores finitos, índices não utilizados, sinal dos duais de dia, igualdade primal/dual, custos reduzidos e complementaridade nas colunas disponíveis.
-- [ ] Criar `rmp_` no construtor de `BranchAndPrice` e integrar seu uso ao processamento dos nós; atualmente a validação usa um objeto local em `solve()`.
-- [ ] Substituir o retorno antecipado da validação em `solve()` ao integrar a busca: atualmente `return incumbent_` encerra a execução antes do `while` quando o PMR inicial é ótimo e inteiro.
+- [x] Criar `rmp_` no construtor e usá-lo no diagnóstico do PMR da raiz em `processNode()`.
+- [x] Remover o retorno antecipado da validação em `solve()`; o nó não certificado é devolvido à fronteira.
 - [x] Verificar integralidade de todos os valores antes de converter `x` em `Solution`; no teste local, rejeitar explicitamente um LP fracionário enquanto pricing/branching não estiverem integrados.
 - [x] Validar a `Solution` construída: cobertura, dias, capacidade, conflitos e custos recalculados por `evaluateRoute`; comparar a soma com o objetivo LP e só então atualizar a incumbente.
 - [ ] Tratar explicitamente resultados diferentes de `GRB_OPTIMAL`, mantendo incumbente viável e LB certificado sob interrupção.
@@ -99,7 +98,8 @@ existente de `build/` referencia outro caminho do repositório.
 
 - [ ] Implementar `isIntegral()` e montar a solução a partir das variáveis do mestre.
 - [x] Implementar `updateIncumbent()` para guardar soluções validadas de menor custo, com tolerância de `1e-6`; atualmente chamado pelo teste local do PMR.
-- [ ] Implementar `columnAllowed()` respeitando decisões SAME e DIFFERENT.
+- [x] Implementar `columnAllowed()` respeitando decisões SAME e DIFFERENT (inspeção do código).
+- [ ] Testar `columnAllowed()` com as combinações de presença dos clientes e múltiplas decisões; a filtragem e o mapeamento no PMR estão implementados, mas ainda não foram testados com decisões.
 - [ ] Implementar `selectBranchingPair()` e criar os filhos em `branch()` com decisões de Ryan-Foster.
 - [ ] Implementar podas por limitante antes e depois do processamento de cada nó.
 - [ ] Adicionar seleção por melhor limitante em `selectNode()`.
@@ -110,4 +110,5 @@ existente de `build/` referencia outro caminho do repositório.
 - [ ] Gravar a solução e o LB no formato oficial em `-o`; a impressão atual no terminal é apenas para inspeção.
 - [ ] Implementar a heurística de arredondamento com o pool de colunas e limite `cfg_.heuristic_time`.
 - [ ] Preencher estatísticas de colunas, pricing e tempo total, além dos registros de execução.
+- [ ] Incrementar os contadores de chamadas heurísticas e exatas quando o pricing for implementado; `logNode()` já imprime esses contadores e os demais dados disponíveis em `stderr`. Integrar os duais ao log por nó após a integração do PMR e validar os registros com a árvore funcional.
 - [ ] Definir e implementar o pré-processamento/propagação da EXP2, condicionado a `cfg_.use_preprocessing` (adiado por enquanto).

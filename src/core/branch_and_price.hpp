@@ -41,6 +41,8 @@ struct Solution {
 struct Stats {
     long nodes = 0;
     long columns_generated = 0;
+    long heuristic_pricing_calls = 0;
+    long exact_pricing_calls = 0;
     double time_pricing = 0;
     double time_total = 0;
     double root_lb = 0;
@@ -81,7 +83,8 @@ public:
 
 private:
     // --- árvore ---
-    void initRoot();                                  // cria nó raiz + colunas iniciais
+    Solution validateInitialRmp(const RMPSolver& rmp, const std::vector<std::size_t>& columnIndices) const;
+    void initRoot();                                  
     std::unique_ptr<Node> selectNode();               // DFS ou best-bound
     void pushNode(std::unique_ptr<Node> n);
     void updateGlobalLB();                            // LB global = min lb dos nós abertos
@@ -102,8 +105,9 @@ private:
 
     // --- utilidades ---
     bool timeIsUp() const;
+    Solution buildInitialSolution() const;
     void updateIncumbent(const Solution& s);
-    void logNode(const Node& node) const;             // stderr: ajuda no exemplo à mão
+    void logNode(const Node& node) const;             // estatísticas acumuladas em stderr
 
 
     const Instance& inst_;
