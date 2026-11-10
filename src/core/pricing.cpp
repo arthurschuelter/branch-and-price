@@ -364,14 +364,26 @@ PricingResult Pricer::exact(
         if (status == GRB_TIME_LIMIT) {
             return {PricingStatus::Interrupted, std::move(columns)};
         }
-        if (status == GRB_INFEASIBLE) continue;
-        if (status != GRB_OPTIMAL) return {PricingStatus::Error, {}};
+
+        if (status == GRB_INFEASIBLE) {
+            continue;
+        }
+        
+        if (status != GRB_OPTIMAL) {
+            return {
+                PricingStatus::Error, 
+                {}
+            };
+        }
 
         const double objectiveValue = model.get(GRB_DoubleAttr_ObjVal);
         if (objectiveValue >= -eps) {
             const double bound = model.get(GRB_DoubleAttr_ObjBound);
             if (!std::isfinite(bound) || bound < -eps) {
-                return {PricingStatus::Error, {}};
+                return {
+                    PricingStatus::Inconclusive, 
+                    std::move(columns)
+                };
             }
             continue;
         }

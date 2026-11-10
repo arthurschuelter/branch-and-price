@@ -386,62 +386,120 @@ NodeResult BranchAndPrice::processNode(Node& node) {
         columnIndices.push_back(i);
     }
 
-    double elapsed = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - this->t0_
-    ).count();
-
-
-    double remainingSeconds = this->cfg_.time_limit - elapsed;
-    int grbStatus = this->rmp_->solveLP(remainingSeconds);
-    if (grbStatus == GRB_OPTIMAL) {
-        const auto initialSolution = validateInitialRmp(*this->rmp_, columnIndices);
-        if (initialSolution) { 
-            updateIncumbent(*initialSolution); 
-        }
-    }
-    else if (grbStatus == GRB_TIME_LIMIT) {
-        // Preserva incumbente e LB.
-        return NodeResult::Unresolved;
-    }
-    else if (grbStatus == GRB_INFEASIBLE) {
-        // PMR inviável.
-        return NodeResult::Unresolved;
-    }
-    else {
-        std::cerr << "Status inesperado do PMR: " << grbStatus << '\n';
-        return NodeResult::Error;
-    }
-
-    // return columnGeneration(node);
-    return NodeResult::Unresolved;
+    return columnGeneration(node, columnIndices);
 }
 
-bool BranchAndPrice::columnGeneration(Node& node) {
-    // PRÓXIMA FASE — começar depois de integrar e validar PMR 1 a 10.
-    // TODO [CG 2]: remover o retorno provisório abaixo ao implementar o ciclo.
-    // TODO [CG 3]: resolver PMR, conferir status e extrair u_i/lambda_d.
-    // TODO [CG 4]: pricing heurístico com decisões do nó; se não encontrar
-    // coluna melhorante, executar pricing exato para TODOS os dias.
-    // TODO [CG 5]: validar rota, dia, decisões e custo reduzido das candidatas;
-    // deduplicar sequência/dia, inserir no pool e no mestre e atualizar índices.
-    // TODO [CG 6]: repetir LP/pricing. Só atualizar node.lb após prova exata
-    // de ausência de custo reduzido negativo; timeout mantém LB certificado anterior.
-    return true;
-    while (!timeIsUp()) {
-        // (a) TODO: rmp_->solveLP();  se inviável -> return false
-        // (b) TODO: obter duais u_i e lambda_d
-        // (c) Pricing:
-        //     TODO: if (cfg_.use_heuristic_pricing) cols = pricer_->heuristic(duais, node.decisions);
-        //     TODO: if (cols.empty()) cols = pricer_->exact(duais, node.decisions);
-        // (d) TODO: se cols.empty(): convergiu -> node.lb = obj do RMP (LB válido!)
-        //           se ainda houver artificial > 0 -> nó inviável (return false)
-        //           break;
-        // (e) TODO: adicionar cols ao pool_ (sem duplicar) e ao rmp_
-        //     stats_.columns_generated += ...
+NodeResult BranchAndPrice::columnGeneration(Node& node, std::vector<std::size_t>& columnIndices) {
+    constexpr double eps = 1e-6;
+    auto remaining = [&]() {
+        return cfg_.time_limit - std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - t0_).count();
+    };
+    try {
+        while (remaining() > 0.0) {
+            const int status = rmp_->solveLP(remaining());
+            if (status == GRB_TIME_LIMIT || status == GRB_INFEASIBLE) {
+                return NodeResult::Unresolved;
+            }
+
+            if (status != GRB_OPTIMAL) {
+                return NodeResult::Error;
+            }
+
+            const auto solution = validateInitialRmp(*rmp_, columnIndices);
+            if (solution) {
+                updateIncumbent(*solution);
+            }
+
+            const auto u = rmp_->customerDuals();
+            const auto lambda = rmp_->dayDuals();
+
+            auto insert = [&](const PricingResult& result) {
+                int added = 0;
+                for (const auto& c : result.columns) {
+
+                    const auto evaluation = inst_.evaluateRoute(c.route, c.day);
+                    std::vector<bool> has(inst_.vertexCount(), false);
+                    for (int customer : c.route) {
+                        has[customer] = true;
+                    }
+                    
+                    if (!evaluation.valid || has != c.has || !std::isfinite(c.cost) ||
+                        std::abs(c.cost - evaluation.total_cost) > eps ||
+                        reducedCost(c, u, lambda) >= -eps) {
+                        throw std::runtime_error("Coluna de pricing inválida");
+                    }
+                    bool exists = false;
+                    for (std::size_t index : columnIndices) {
+                        if (pool_[index].day == c.day && pool_[index].route == c.route) {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (exists) {
+                        continue;
+                    }
+                    
+                    pool_.push_back(c);
+                    columnIndices.push_back(pool_.size() - 1);
+                    rmp_->addColumn(pool_.back());
+                    ++added;
+                    ++stats_.columns_generated;
+                }
+                return added;
+            };
+
+            if (cfg_.use_heuristic_pricing && remaining() > 0.0) {
+                ++stats_.heuristic_pricing_calls;
+                auto result = pricer_->heuristic(u, lambda, node.decisions, remaining());
+                if (result.status == PricingStatus::Error) {
+                    return NodeResult::Error;
+                }
+                
+                const int added = insert(result);
+                
+                if (result.status != PricingStatus::Completed) {
+                    return NodeResult::Unresolved;
+                }
+
+                if (added) {
+                    continue;
+                }
+            }
+            if (remaining() <= 0.0) {
+                return NodeResult::Unresolved;
+            }
+
+            ++stats_.exact_pricing_calls;
+            auto result = pricer_->exact(u, lambda, node.decisions, remaining());
+            if (result.status == PricingStatus::Error) {
+                return NodeResult::Error;
+            }
+
+            const int added = insert(result);
+            if (result.status != PricingStatus::Completed) {
+                return NodeResult::Unresolved;
+            }
+
+            if (added) {
+                continue;
+            }
+            
+            if (!result.columns.empty()) {
+                std::cerr << "Pricing exato retornou apenas colunas já presentes.\n";
+                return NodeResult::Unresolved;
+            }
+
+            // A certificação e o fechamento ainda dependem da validação independente
+            // do pricing e das tolerâncias numéricas. Manter o nó aberto.
+            std::cerr << "Pricing concluído sem novas colunas; nó permanece aberto enquanto a certificação é validada.\n";
+            return NodeResult::Unresolved;
+        }
+    } catch (const GRBException& e) {
+        std::cerr << "Erro Gurobi na geração de colunas: " << e.getMessage() << '\n';
+        return NodeResult::Error;
     }
-    // Se parou por tempo, o obj do RMP NÃO é limitante inferior válido!
-    // TODO: tratar esse caso (não atualizar lb / marcar nó como não resolvido)
-    return true;
+    return NodeResult::Unresolved;
 }
 
 bool BranchAndPrice::columnAllowed(const Column& c, const Node& node) const {

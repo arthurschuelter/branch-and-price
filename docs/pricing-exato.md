@@ -106,10 +106,9 @@ Após a resolução:
 - `GRB_INFEASIBLE` leva ao próximo dia.
 - Status diferente de `GRB_OPTIMAL` resulta em `Error`.
 - Se `ObjVal >= -eps`, a função consulta `ObjBound`. Um limite não finito ou
-  menor que `-eps` resulta em `Error`; caso contrário, ela passa ao próximo dia.
+  menor que `-eps` resulta em `Inconclusive`; caso contrário, ela passa ao próximo dia.
 
-O código trata um limite inconclusivo como erro de forma conservadora. Ainda
-falta distinguir esse caso dos demais erros e revisar as tolerâncias do solver.
+O limite inconclusivo mantém o nó aberto. Ainda falta revisar as tolerâncias do solver.
 
 ## 7. Reconstrução e validação da coluna
 
@@ -133,7 +132,6 @@ colunas encontradas, que podem ser nenhuma. Uma busca concluída sem colunas
 indica ausência de custo reduzido abaixo de `-eps` segundo os estados, limites
 e tolerâncias aceitos pela implementação.
 
-Ainda falta integrar o pricing ao ciclo de geração de colunas, revisar
-tolerâncias e exceções do Gurobi e ampliar a validação em instâncias pequenas e
-sob interrupção. O resultado ainda não deve ser usado para atualizar o LB ou
-fechar um nó antes dessa integração e validação.
+O ciclo de geração de colunas chama a heurística e, quando necessário, o pricing
+exato. Ainda é necessário revisar tolerâncias e ampliar a validação em instâncias
+pequenas e sob interrupção. O resultado ainda não atualiza o LB nem fecha o nó.

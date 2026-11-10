@@ -2,31 +2,33 @@
 #include <vector>
 #include <deque>
 #include <optional>
+#include <vector>
+#include <memory>
+#include <chrono>
+
 #include <iterator>
 #include <iostream>
 #include <stdexcept>
 #include <utility>
-#include <vector>
 #include <cmath>
 #include <limits>
-#include <memory>
-#include <chrono>
 #include <string>
 
 #include "instance.hpp"
 #include "solver_rmp.hpp"
 
 struct Column {
-    std::vector<int> route;   // ordem de visita (sem o depósito) -> útil p/ saída
-    std::vector<bool> has;    // has[i] = true se cliente i está na rota (consulta O(1))
-    int day;                  // dia d
-    double cost;              // c_{R,d} = rho(R) + pi(R,d)
+    std::vector<int> route;
+    std::vector<bool> has;
+    int day;
+    double cost;
     // TODO: considere guardar um hash/assinatura para detectar colunas duplicadas
 };
 
 enum class PricingStatus {
     Completed,
     Interrupted,
+    Inconclusive,
     Error
 };
 
@@ -37,16 +39,16 @@ struct PricingResult {
 
 // Decisão de ramificação de Ryan-Foster
 struct BranchDecision {
-    int i, j;       // par de clientes (i < j)
-    bool same;      // true = SAME (mesma rota), false = DIFFERENT
+    int i, j;
+    bool same;
 };
 
 // Nó da árvore
 struct Node {
     int id;
     int depth;
-    double lb;                              // limitante inferior do nó (valor do PMR)
-    std::vector<BranchDecision> decisions;  // caminho da raiz até aqui (todas as decisões)
+    double lb;
+    std::vector<BranchDecision> decisions;
     // TODO: guardar a solução fracionária? duais para warm start? (decida o que precisa)
 };
 
@@ -58,8 +60,8 @@ enum class NodeResult {
 };
 
 struct Solution {
-    double cost = 1e18;                 // Upper Bound
-    std::vector<Column> columns;        // rotas escolhidas
+    double cost = 1e18;
+    std::vector<Column> columns;
 };
 
 struct Stats {
@@ -88,14 +90,14 @@ struct Config {
 // ---------------------------------------------------------------
 // Classe principal
 // ---------------------------------------------------------------
-class Instance;     // instance.hpp
-class Pricer;       // pricing.hpp     (heurístico + exato)
+class Instance;
+class Pricer;
 
 class BranchAndPrice {
 public:
     BranchAndPrice(const Instance& inst, const Config& cfg);
     ~BranchAndPrice();
-    Solution solve();                       // laço principal da árvore
+    Solution solve();
 
     double lowerBound() const { return global_lb_; }
     const Stats& stats() const { return stats_; }
@@ -115,7 +117,7 @@ private:
 
     // --- processamento de um nó ---
     NodeResult processNode(Node& node);
-    bool columnGeneration(Node& node);                // loop: RMP -> pricing -> add cols
+    NodeResult columnGeneration(Node& node, std::vector<std::size_t>& columnIndices);
     bool columnAllowed(const Column& c, const Node& node) const;  // respeita SAME/DIFF?
 
     // --- ramificação ---
@@ -136,17 +138,16 @@ private:
         const std::vector<double>& dayDuals
     ) const;
     void updateIncumbent(const Solution& s);
-    void logNode(const Node& node) const;             // estatísticas acumuladas em stderr
-
+    void logNode(const Node& node) const;
 
     const Instance& inst_;
     Config cfg_;
     Stats stats_;
 
-    std::vector<Column> pool_;          // pool GLOBAL de colunas (filtra-se por nó)
-    std::deque<std::unique_ptr<Node>> open_;   // nós abertos (TODO: trocar por priority_queue p/ best-bound)
+    std::vector<Column> pool_;
+    std::deque<std::unique_ptr<Node>> open_;
 
-    Solution incumbent_;                // Upper Bound
+    Solution incumbent_;
     double global_lb_ = 0;
 
     std::shared_ptr<RMPSolver> rmp_;

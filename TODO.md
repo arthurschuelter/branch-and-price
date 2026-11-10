@@ -1,5 +1,16 @@
 # TODO
 
+## Estado atual: ciclo de geração de colunas
+
+O ciclo no processamento do nó resolve o PMR, valida e insere candidatas,
+chama a heurística e recorre ao exato. Limite inconclusivo e interrupção mantêm
+o nó aberto; exceções Gurobi no ciclo são tratadas como erro. No exemplo oficial,
+o PMR chegou a 59 e foi obtida uma solução viável de custo 59; isso não valida
+independentemente o pricing nem certifica o LB. Execução anterior conferida; compilação do código atual conferida, com avisos.
+Continuam pendentes os testes dos grupos e do PMR filtrado, enumeração independente
+do pricing, testes de interrupção e revisão numérica. Por isso o ciclo ainda não
+atribui LB certificado nem fecha o nó após o pricing terminar.
+
 ## Instância, parser e avaliação de rota
 
 - [x] Parser de roteamento e avaliação de rotas implementados; exemplo oficial conferido.
@@ -8,7 +19,7 @@
 
 - [x] Inicialização da raiz e colunas unitárias implementadas; exemplo oficial com 36 colunas conferido.
 
-## Controle da busca (concluído)
+## Controle da busca (parcial)
 
 - [x] Seleção DFS e controle de tempo com relógio monotônico implementados.
 
@@ -32,11 +43,11 @@ integração completa à árvore e a certificação pelo pricing continuam pende
 7. Implementado: verificar integralidade antes de construir `Solution`; LP fracionário válido retorna `std::nullopt`. `isIntegral()` também consulta e verifica os valores do mestre. Código inspecionado e compilado; falta verificar em execução o caso fracionário e integrar a função à busca após LP ótimo e certificação (`PMR 7–7a`).
 8. Concluída no diagnóstico a validação da solução inteira antes de atualizar a incumbente (`PMR 8–8a`).
 9. `NodeResult` declarado, retornado por `processNode()` e tratado em `solve()`; implementação inspecionada e compilada. O resultado de convergência ainda depende do pricing (`PMR 9`).
-10. Condicionar podas e fechamento à certificação; em seguida implementar os marcadores `CG 1–6` de geração de colunas (`PMR 10`).
+10. O ciclo `CG 1–6` foi iniciado; faltam validação, certificação e condicionar podas e fechamento a ela (`PMR 10`).
 
 Conferir o PMR unitário do exemplo contra o registro 78 e as 36 colunas, sem
 interpretar esse resultado como LB certificado ou ótimo completo 59. Não habilitar
-a árvore como concluída enquanto `columnGeneration()` ainda retornar provisoriamente.
+a árvore como concluída enquanto `columnGeneration()` mantiver o nó aberto sem certificação.
 
 ### Sequência de trabalho em `processNode()`
 
@@ -44,7 +55,7 @@ a árvore como concluída enquanto `columnGeneration()` ainda retornar provisori
 2. **PMR 6a–6c:** verificar o LP com colunas filtradas. Timeout e PMR inviável preservam o nó como não resolvido; inviabilidade do PMR filtrado não certifica inviabilidade do nó.
 3. **PMR 7–8:** validação primal/dual ocorre antes da construção condicional de solução inteira; o código aceita LP fracionário válido e atualiza a incumbente apenas para solução inteira validada. Verificar o comportamento fracionário após a alteração; as duas partes ainda estão na mesma função.
 4. **PMR 9:** `solve()` trata os resultados atuais de `processNode()`; falta integrar a convergência certificada ao pricing e verificar os casos em execução.
-5. **PMR 10:** condicionar podas e fechamento à certificação. Concluir essa etapa após implementar o ciclo de geração de colunas e o pricing exato (`CG 1–6`).
+5. **PMR 10:** condicionar podas e fechamento à certificação. Validar e completar o ciclo de geração de colunas e o pricing exato (`CG 1–6`).
 
 - [x] Diagnóstico primal/dual do PMR, verificação de integralidade e retorno de LP fracionário implementados.
 - [ ] Verificar em execução o retorno para LP fracionário após a alteração.
@@ -70,22 +81,26 @@ existente de `build/` referencia outro caminho do repositório.
 - [x] Objetivo por dia, validação de duais e reconstrução de rotas implementados; comparação temporária com enumeração no exemplo e consulta de ObjBound registradas em docs/pricing-exato.md.
 - [ ] Ampliar validação do pricing exato com instâncias pequenas variadas e interrupção durante a otimização; integrar certificação ao ciclo.
 - [x] Consulta de `ObjBound` implementada e explicação do pricing exato registrada em `docs/pricing-exato.md`.
-- [ ] Distinguir limite numérico inconclusivo de erro e verificar esse tratamento em execução antes de integrar a certificação.
-- [ ] Tratar exceções do Gurobi e revisar tolerâncias numéricas antes de integrar a certificação do pricing.
-- [ ] Implementar os métodos do `Pricer` e integrar sua interface ao ciclo de geração de colunas.
+- [x] Distinguir `Inconclusive` de `Error` na interface do pricing exato; implementação inspecionada.
+- [ ] Verificar o limite inconclusivo em execução e revisar as tolerâncias antes de certificar.
+- [ ] Completar o tratamento de exceções do Gurobi: o `catch` atual cobre o ciclo, mas não a montagem do PMR em `processNode()` nem a construção dos solvers; preservar diagnósticos dos status inesperados. Revisar tolerâncias numéricas.
+- [x] Métodos iniciais do `Pricer` integrados ao ciclo de geração de colunas; validação adicional pendente.
 - [x] `pricer_` criado e pricing heurístico inicial implementado: combina grupos SAME, verifica decisões e custos, retorna candidatas e confere tempo em partes da busca.
 - [ ] Verificar em execução as candidatas da heurística, inclusive decisões, custos reduzidos e interrupção; ampliar controle de tempo nas demais etapas.
 - [x] PMR montado com colunas permitidas e grupos SAME por dia; inspeção realizada, com verificações específicas pendentes.
 - [ ] Completar o processamento do nó e garantir viabilidade conforme a Fase 3.1 do roadmap; se optar por artificiais, usar uma fase de viabilidade certificada.
-- [ ] Remover o `return true` provisório no início de `columnGeneration()` ao implementar o ciclo.
-- [ ] Implementar pricing heurístico seguido de pricing exato quando a heurística não encontrar coluna de custo reduzido negativo.
-- [ ] Implementar `columnGeneration()`: resolver o LP, extrair duais, executar pricing e adicionar novas colunas sem duplicação.
+- [x] Removido o `return true` provisório de `columnGeneration()`.
+- [x] Ciclo tenta pricing heurístico e chama o exato quando a heurística não insere coluna nova; implementação inicial inspecionada e execução anterior do exemplo registrada.
+- [x] Ciclo inicial resolve LP, extrai duais, executa pricing e insere colunas novas por sequência/dia no PMR e no pool; execução anterior do exemplo registrada.
+- [ ] Validar candidatas com segurança antes de indexar: rejeitar rota inválida e índices fora do intervalo antes de construir `has`; conferir explicitamente SAME/DIFFERENT com `columnAllowed()` antes de inserir.
+- [ ] Reorganizar a inserção para preservar a correspondência entre pool, índices e PMR em caso de erro; centralizar a identificação de duplicatas por sequência/dia.
 - [ ] Repetir o ciclo até o pricing exato provar que não há coluna com custo reduzido negativo; verificar as artificiais e registrar o limite inferior da raiz.
-- [ ] Tratar interrupção por tempo sem usar o objetivo de um PMR não convergido como limite inferior válido.
+- [x] O ciclo mantém o nó não resolvido sem atualizar LB em timeout ou pricing inconclusivo; implementação inspecionada.
+- [ ] Verificar interrupções em execução e distinguir as causas de `Unresolved`, incluindo PMR inviável, timeout e pricing exato concluído sem candidata; não confundir conclusão do pricing com certificação.
 
-Próximos passos do pricing exato: distinguir limite inconclusivo de erro,
-tratar exceções e revisar tolerâncias; ampliar a validação e integrar o pricing
-ao ciclo de geração de colunas sem certificar convergência prematuramente.
+Próximos passos: verificar grupos SAME/DIFFERENT e PMR filtrado; corrigir a
+validação de candidatas; ampliar a validação independente do pricing e revisar
+tolerâncias e exceções antes de integrar a certificação.
 
 ## Depois: soluções inteiras e ramificação
 
@@ -102,6 +117,6 @@ ao ciclo de geração de colunas sem certificar convergência prematuramente.
 - [ ] Após concluir um fluxo funcional de roteamento, avaliar e extrair uma camada comum de branch-and-price ao implementar bin packing; manter formulação, pricing, colunas e regras específicas por problema. Considerar extensões futuras, como scheduling, sem presumir a mesma regra de branching ou os mesmos limites.
 - [ ] Gravar a solução e o LB no formato oficial em `-o`; a impressão atual no terminal é apenas para inspeção.
 - [ ] Implementar a heurística de arredondamento com o pool de colunas e limite `cfg_.heuristic_time`.
-- [ ] Preencher estatísticas de colunas, pricing e tempo total, além dos registros de execução.
-- [ ] Incrementar os contadores de chamadas heurísticas e exatas quando o pricing for implementado; `logNode()` já imprime esses contadores e os demais dados disponíveis em `stderr`. Integrar os duais ao log por nó após a integração do PMR e validar os registros com a árvore funcional.
+- [x] Contadores de colunas geradas e chamadas heurísticas/exatas incrementados no ciclo e exibidos em `logNode()`; execução anterior registrada.
+- [ ] Preencher tempo de pricing, tempo total e demais estatísticas; organizar os duais no log por nó e validar os registros com a árvore funcional.
 - [ ] Definir e implementar o pré-processamento/propagação da EXP2, condicionado a `cfg_.use_preprocessing` (adiado por enquanto).
