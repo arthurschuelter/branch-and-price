@@ -7,6 +7,8 @@ description: Orientar desenvolvimento, revisão e validação do projeto C++ bra
 
 ## Contexto e fontes
 
+Preferência do usuário: não criar nem adicionar testes automatizados para este projeto, salvo pedido explícito posterior. Para verificar comportamento, usar inspeção e verificações manuais conforme necessário.
+
 O checkout de referência está em `/Users/arthurschuelter/Documents/branch-and-price`. Se o usuário indicar outro checkout, trabalhar nele. Os caminhos abaixo são relativos à raiz do projeto.
 
 Ler `roadmap.md` e `TODO.md` antes de definir a próxima etapa. O roadmap descreve os dois problemas e seus requisitos; o TODO registra o progresso do roteamento. Conferir os arquivos afetados antes de afirmar que uma etapa está implementada. Consultar `enunciado-roteamento.pdf` ou `enunciado-bin-packing.pdf` quando a tarefa depender do contrato oficial. O nome antigo `enunciado.pdf` ainda aparece no TODO.

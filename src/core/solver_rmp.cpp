@@ -5,6 +5,13 @@
 
 RMPSolver::RMPSolver(const Instance& inst) : inst_(inst) { reset(); }
 
+void RMPSolver::discard() noexcept {
+    vars_.clear();
+    coverage_.clear();
+    days_.clear();
+    model_.reset();
+}
+
 void RMPSolver::reset() {
     this->vars_.clear();
     this->coverage_.clear();
@@ -31,6 +38,7 @@ void RMPSolver::reset() {
 }
 
 void RMPSolver::addColumn(const Column& column) {
+    vars_.reserve(vars_.size() + 1);
     GRBColumn coefficients;
 
     for (int v = 0; v < this->inst_.vertexCount(); ++v) {

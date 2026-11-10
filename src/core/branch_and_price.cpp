@@ -1,5 +1,9 @@
 #include "branch_and_price.hpp"
 #include "pricing.hpp"
+#include <algorithm>
+#include <iomanip>
+#include <sstream>
+#include <functional>
 // #include "instance.hpp"
 // #include "solver_rmp.hpp"
 
@@ -56,6 +60,9 @@ Solution BranchAndPrice::buildInitialSolution() const {
 
 Solution BranchAndPrice::solve() {
     t0_ = std::chrono::steady_clock::now();
+    stats_ = Stats{};
+    incumbent_ = Solution{};
+    global_lb_ = 0.0;
     initRoot();
     
     Solution initial = buildInitialSolution();
@@ -67,47 +74,79 @@ Solution BranchAndPrice::solve() {
     while (!open_.empty() && !timeIsUp()) {
         auto node = selectNode();
 
-        // Poda por limitante: lb herdado do pai já não melhora o UB?
-        // TODO: if (node->lb >= incumbent_.cost - eps) continue;
+        if (node->lb >= incumbent_.cost) {
+            updateGlobalLB();
+            continue;
+        }
 
         stats_.nodes++;
-        const NodeResult result = processNode(*node);   // resolve o nó (geração de colunas)
+        std::vector<std::size_t> columnIndices;
+        const NodeResult result = processNode(*node, columnIndices);   // resolve o nó (geração de colunas)
         logNode(*node);
 
-        if (result == NodeResult::Unresolved) {
+        if (result == NodeResult::TimeLimit || result == NodeResult::RestrictedMasterInfeasible ||
+            result == NodeResult::PricingInterrupted || result == NodeResult::PricingInconclusive ||
+            result == NodeResult::NoCertification || result == NodeResult::DuplicateColumns) {
+            const char* reason = result == NodeResult::TimeLimit ? "tempo esgotado" :
+                result == NodeResult::RestrictedMasterInfeasible ? "PMR inviável" :
+                result == NodeResult::PricingInterrupted ? "pricing interrompido" :
+                result == NodeResult::PricingInconclusive ? "pricing inconclusivo" :
+                result == NodeResult::DuplicateColumns ? "colunas duplicadas" : "sem certificação";
+            std::cerr << "Nó não resolvido: " << reason << '\n';
             pushNode(std::move(node));
+            updateGlobalLB();
             break;
         }
 
         if (result == NodeResult::Infeasible) {
+            updateGlobalLB();
             continue;
         }
 
         if (result == NodeResult::Error) {
             throw std::runtime_error("Erro ao processar nó");
         }
+        if (result != NodeResult::Converged) {
+            throw std::runtime_error("Resultado inesperado ao processar nó");
+        }
 
-        // TODO: depois de processNode, node->lb está atualizado
-        // TODO: poda por limitante de novo (lb >= UB)
-
-        // TODO [PMR 10]: habilitar podas/fechamento por ótimo do nó somente após
-        // pricing certificar convergência. Enquanto CG estiver incompleta,
-        // um LP integral pode fornecer UB validado, mas não encerra o nó.
-        if (isIntegral()) {
-            // TODO: montar Solution a partir do RMP e chamar updateIncumbent()
+        if (node->lb >= incumbent_.cost) {
+            updateGlobalLB();
             continue;
         }
 
+        if (isIntegral()) {
+            // Sem igualdade entre UB e LB certificado não é seguro fechar o nó.
+            pushNode(std::move(node));
+            updateGlobalLB();
+            break;
+        }
+
         int i, j;
-        if (selectBranchingPair(i, j)) branch(*node, i, j);
-        // TODO: e se nenhum par for encontrado mas a solução é fracionária? (investigar)
+        if (selectBranchingPair(columnIndices, i, j)) {
+            branch(*node, i, j);
+        } else {
+            const auto solution = assignBlocks(columnIndices);
+            if (solution) updateIncumbent(*solution);
+            if (node->lb >= incumbent_.cost) {
+                updateGlobalLB();
+                continue;
+            }
+            // Uma incumbente isolada não certifica o fechamento do nó.
+            pushNode(std::move(node));
+            updateGlobalLB();
+            break;
+        }
 
         updateGlobalLB();
     }
 
     // Tempo acabou (ou árvore esgotada)
-    if (!open_.empty()) roundingHeuristic();   // -h
-    // TODO: preencher stats_.time_total
+    updateGlobalLB();
+    if (!open_.empty() && cfg_.heuristic_time > 0.0) roundingHeuristic();
+    updateGlobalLB();
+    stats_.time_total = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0_).count();
     return incumbent_;
 }
 
@@ -266,9 +305,35 @@ std::optional<Solution> BranchAndPrice::validateInitialRmp(
     return solution;
 }
 
+double BranchAndPrice::initialRoutingLowerBound() const {
+    // Saturar em inteiro exatamente representável evita arredondar o LB para cima.
+    constexpr double cap = 4503599627370496.0; // 2^52
+    double bound = 0.0;
+    const auto add = [&](int value) {
+        bound = (bound >= cap - static_cast<double>(value))
+            ? cap : bound + static_cast<double>(value);
+    };
+    const int n = inst_.vertexCount();
+    if (n <= 1) return 0.0;
+    int depotMin = std::numeric_limits<int>::max();
+    for (int i = 0; i < n; ++i) {
+        if (i == inst_.depot) continue;
+        depotMin = std::min(depotMin, inst_.travel_costs[inst_.depot][i]);
+        int minOutgoing = std::numeric_limits<int>::max();
+        for (int j = 0; j < n; ++j) {
+            if (i != j) minOutgoing = std::min(minOutgoing, inst_.travel_costs[i][j]);
+        }
+        add(inst_.vertices[i].priorities[0]);
+        add(minOutgoing);
+    }
+    add(depotMin);
+    return bound;
+}
+
 void BranchAndPrice::initRoot() {
     this->pool_.clear();
     this->open_.clear();
+    next_node_id_ = 1;
 
     for (int customer = 0; customer < inst_.vertexCount(); ++customer) {
         if (inst_.depot == customer) continue;
@@ -299,16 +364,16 @@ void BranchAndPrice::initRoot() {
     auto root = std::make_unique<Node>();
     root->id = 0;
     root->depth = 0;
-    root->lb = -std::numeric_limits<double>::infinity()/2;
+    root->lb = initialRoutingLowerBound();
+    global_lb_ = root->lb;
+    stats_.root_lb = root->lb;
 
     this->pushNode(std::move(root));
 }
 
-// ---------------------------------------------------------------
-// Processamento de um nó
-// ---------------------------------------------------------------
-NodeResult BranchAndPrice::processNode(Node& node) {
+NodeResult BranchAndPrice::processNode(Node& node, std::vector<std::size_t>& columnIndices) {
     // O PMR inviável não prova inviabilidade do nó; não atualizar node.lb sem certificação.
+    columnIndices.clear();
 
     std::vector<int> initialGroup(inst_.vertexCount());
     for (int i = 0; i < inst_.vertexCount(); ++i) {
@@ -362,28 +427,31 @@ NodeResult BranchAndPrice::processNode(Node& node) {
             }
             col.cost = inst_.evaluateRoute(col.route, d).total_cost;
 
-            bool columnExists = false;
-            for (const Column& p: pool_) {
-                if (p.route == col.route && p.day == col.day) { 
-                    columnExists = true;
-                    break; 
-                }
-            }
-
-            if (!columnExists) {
+            if (!findPoolColumn(col)) {
                 pool_.push_back(col);
             }
         }
     }
 
-    this->rmp_->reset();
- 
-    std::vector<std::size_t> columnIndices;
-    for (std::size_t i = 0; i < this->pool_.size(); ++i) {
-        if (!this->columnAllowed(this->pool_[i], node)) { continue; }
+    try {
+        columnIndices.reserve(pool_.size());
+        rmp_->reset();
+        for (std::size_t i = 0; i < pool_.size(); ++i) {
+            if (!columnAllowed(pool_[i], node)) { continue; }
 
-        this->rmp_->addColumn(this->pool_[i]);
-        columnIndices.push_back(i);
+            rmp_->addColumn(pool_[i]);
+            columnIndices.push_back(i);
+        }
+    } catch (const GRBException& e) {
+        std::cerr << "Erro Gurobi na montagem do PMR: " << e.getMessage() << '\n';
+        rmp_->discard();
+        columnIndices.clear();
+        return NodeResult::Error;
+    } catch (const std::exception& e) {
+        std::cerr << "Erro na montagem do PMR: " << e.what() << '\n';
+        rmp_->discard();
+        columnIndices.clear();
+        return NodeResult::Error;
     }
 
     return columnGeneration(node, columnIndices);
@@ -398,9 +466,8 @@ NodeResult BranchAndPrice::columnGeneration(Node& node, std::vector<std::size_t>
     try {
         while (remaining() > 0.0) {
             const int status = rmp_->solveLP(remaining());
-            if (status == GRB_TIME_LIMIT || status == GRB_INFEASIBLE) {
-                return NodeResult::Unresolved;
-            }
+            if (status == GRB_TIME_LIMIT) return NodeResult::TimeLimit;
+            if (status == GRB_INFEASIBLE) return NodeResult::RestrictedMasterInfeasible;
 
             if (status != GRB_OPTIMAL) {
                 return NodeResult::Error;
@@ -419,30 +486,48 @@ NodeResult BranchAndPrice::columnGeneration(Node& node, std::vector<std::size_t>
                 for (const auto& c : result.columns) {
 
                     const auto evaluation = inst_.evaluateRoute(c.route, c.day);
+                    if (!evaluation.valid) {
+                        throw std::runtime_error("Rota de pricing inválida");
+                    }
                     std::vector<bool> has(inst_.vertexCount(), false);
                     for (int customer : c.route) {
                         has[customer] = true;
                     }
                     
-                    if (!evaluation.valid || has != c.has || !std::isfinite(c.cost) ||
-                        std::abs(c.cost - evaluation.total_cost) > eps ||
-                        reducedCost(c, u, lambda) >= -eps) {
+                    if (has != c.has || !columnAllowed(c, node) || !std::isfinite(c.cost) ||
+                        std::abs(c.cost - evaluation.total_cost) > eps) {
                         throw std::runtime_error("Coluna de pricing inválida");
                     }
-                    bool exists = false;
-                    for (std::size_t index : columnIndices) {
-                        if (pool_[index].day == c.day && pool_[index].route == c.route) {
-                            exists = true;
-                            break;
+                    const double rc = reducedCost(c, u, lambda);
+                    if (!std::isfinite(rc) || rc >= -eps) {
+                        throw std::runtime_error("Coluna de pricing inválida");
+                    }
+                    const auto existing = findPoolColumn(c);
+                    if (existing) {
+                        bool inRmp = false;
+                        for (std::size_t index : columnIndices) {
+                            if (index == *existing) { 
+                                inRmp = true; 
+                                break; 
+                            }
                         }
+
+                        if (inRmp) continue;
                     }
-                    if (exists) {
-                        continue;
+
+                    columnIndices.reserve(columnIndices.size() + 1);
+                    const bool newColumn = !existing;
+                    if (newColumn) pool_.push_back(c);
+                    const std::size_t index = existing ? *existing : pool_.size() - 1;
+                    try {
+                        rmp_->addColumn(pool_[index]);
+                    } catch (...) {
+                        if (newColumn) { 
+                            pool_.pop_back();
+                        }
+                        throw;
                     }
-                    
-                    pool_.push_back(c);
-                    columnIndices.push_back(pool_.size() - 1);
-                    rmp_->addColumn(pool_.back());
+                    columnIndices.push_back(index);
                     ++added;
                     ++stats_.columns_generated;
                 }
@@ -459,7 +544,8 @@ NodeResult BranchAndPrice::columnGeneration(Node& node, std::vector<std::size_t>
                 const int added = insert(result);
                 
                 if (result.status != PricingStatus::Completed) {
-                    return NodeResult::Unresolved;
+                    return result.status == PricingStatus::Interrupted
+                        ? NodeResult::PricingInterrupted : NodeResult::PricingInconclusive;
                 }
 
                 if (added) {
@@ -467,7 +553,7 @@ NodeResult BranchAndPrice::columnGeneration(Node& node, std::vector<std::size_t>
                 }
             }
             if (remaining() <= 0.0) {
-                return NodeResult::Unresolved;
+                return NodeResult::TimeLimit;
             }
 
             ++stats_.exact_pricing_calls;
@@ -478,7 +564,8 @@ NodeResult BranchAndPrice::columnGeneration(Node& node, std::vector<std::size_t>
 
             const int added = insert(result);
             if (result.status != PricingStatus::Completed) {
-                return NodeResult::Unresolved;
+                return result.status == PricingStatus::Interrupted
+                    ? NodeResult::PricingInterrupted : NodeResult::PricingInconclusive;
             }
 
             if (added) {
@@ -487,19 +574,72 @@ NodeResult BranchAndPrice::columnGeneration(Node& node, std::vector<std::size_t>
             
             if (!result.columns.empty()) {
                 std::cerr << "Pricing exato retornou apenas colunas já presentes.\n";
-                return NodeResult::Unresolved;
+                return NodeResult::DuplicateColumns;
+            }
+
+            const auto candidate = diagnosticLowerBound(result, u, lambda);
+            if (candidate) {
+                std::ostringstream value;
+                value << std::setprecision(std::numeric_limits<double>::max_digits10)
+                      << *candidate;
+                std::cerr << "Candidata a LB ajustado (não certificada): "
+                          << value.str() << '\n';
+            } else {
+                std::cerr << "Limites por dia incompletos; LB ajustado indisponível.\n";
             }
 
             // A certificação e o fechamento ainda dependem da validação independente
             // do pricing e das tolerâncias numéricas. Manter o nó aberto.
             std::cerr << "Pricing concluído sem novas colunas; nó permanece aberto enquanto a certificação é validada.\n";
-            return NodeResult::Unresolved;
+            return NodeResult::NoCertification;
         }
     } catch (const GRBException& e) {
         std::cerr << "Erro Gurobi na geração de colunas: " << e.getMessage() << '\n';
+        rmp_->discard();
+        columnIndices.clear();
+        return NodeResult::Error;
+    } catch (const std::exception& e) {
+        std::cerr << "Erro na geração de colunas: " << e.what() << '\n';
+        rmp_->discard();
+        columnIndices.clear();
         return NodeResult::Error;
     }
-    return NodeResult::Unresolved;
+    return NodeResult::TimeLimit;
+}
+
+std::optional<double> BranchAndPrice::diagnosticLowerBound(
+    const PricingResult& result,
+    const std::vector<double>& customerDuals,
+    const std::vector<double>& dayDuals
+) const {
+    constexpr double eps = 1e-6;
+    const auto n = static_cast<std::size_t>(inst_.vertexCount());
+    if (result.status != PricingStatus::Completed || !result.columns.empty() ||
+        result.dayLowerBounds.size() != n || customerDuals.size() != n ||
+        dayDuals.size() != n) return std::nullopt;
+
+    double candidate = 0.0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (i == static_cast<std::size_t>(inst_.depot)) continue;
+        if (!std::isfinite(customerDuals[i])) return std::nullopt;
+        candidate += customerDuals[i];
+    }
+    for (std::size_t d = 1; d < n; ++d) {
+        const auto& bound = result.dayLowerBounds[d];
+        if (!bound || !std::isfinite(*bound) || !std::isfinite(dayDuals[d])) {
+            return std::nullopt;
+        }
+        candidate += std::min(dayDuals[d], 0.0) + std::min(0.0, *bound - eps);
+    }
+    if (!std::isfinite(candidate)) return std::nullopt;
+    return candidate;
+}
+
+std::optional<std::size_t> BranchAndPrice::findPoolColumn(const Column& column) const {
+    for (std::size_t i = 0; i < pool_.size(); ++i) {
+        if (pool_[i].day == column.day && pool_[i].route == column.route) return i;
+    }
+    return std::nullopt;
 }
 
 bool BranchAndPrice::columnAllowed(const Column& c, const Node& node) const {
@@ -533,17 +673,153 @@ bool BranchAndPrice::isIntegral(double eps) const {
     return true;
 }
 
-bool BranchAndPrice::selectBranchingPair(int& i, int& j) const {
-    // TODO: calcular f_ij = sum_{R ∋ i,j} sum_d x_{R,d}
-    // TODO: escolher par com f_ij mais próximo de 0.5 (cfg_.branching_rule p/ EXP3)
-    // Dica: pares já fixados por decisões anteriores não precisam ser considerados.
-    return false;
+bool BranchAndPrice::selectBranchingPair(
+    const std::vector<std::size_t>& columnIndices, int& i, int& j
+) const {
+    constexpr double eps = 1e-6;
+    const auto values = rmp_->values();
+    if (values.size() != columnIndices.size()) {
+        throw std::runtime_error("Mapeamento de colunas incompatível com o PMR");
+    }
+    const int n = inst_.vertexCount();
+    std::vector<std::vector<double>> fractions(n, std::vector<double>(n, 0.0));
+    for (std::size_t k = 0; k < values.size(); ++k) {
+        const double x = values[k];
+        if (!std::isfinite(x) || x < -eps || x > 1.0 + eps || columnIndices[k] >= pool_.size()) {
+            throw std::runtime_error("Valor ou índice de coluna inválido na ramificação");
+        }
+        const auto& column = pool_[columnIndices[k]];
+        if (column.has.size() != static_cast<std::size_t>(n)) {
+            throw std::runtime_error("Coluna inválida na ramificação");
+        }
+        for (int a = 0; a < n; ++a) {
+            if (a == inst_.depot || !column.has[a]) continue;
+            for (int b = a + 1; b < n; ++b) {
+                if (b != inst_.depot && column.has[b]) fractions[a][b] += x;
+            }
+        }
+    }
+    bool found = false;
+    double bestDistance = std::numeric_limits<double>::infinity();
+    for (int a = 0; a < n; ++a) {
+        if (a == inst_.depot) continue;
+        for (int b = a + 1; b < n; ++b) {
+            if (b == inst_.depot) continue;
+            const double fraction = fractions[a][b];
+            if (!std::isfinite(fraction) || fraction < -eps || fraction > 1.0 + eps) {
+                throw std::runtime_error("Fração de par inválida no PMR");
+            }
+            if (fraction <= eps || fraction >= 1.0 - eps) continue;
+            const double distance = std::abs(fraction - 0.5);
+            if (!found || distance < bestDistance) {
+                found = true;
+                bestDistance = distance;
+                i = a;
+                j = b;
+            }
+        }
+    }
+    return found;
+}
+
+std::optional<Solution> BranchAndPrice::assignBlocks(
+    const std::vector<std::size_t>& columnIndices
+) const {
+    constexpr double eps = 1e-6;
+    const auto values = rmp_->values();
+    if (values.size() != columnIndices.size()) return std::nullopt;
+    const int n = inst_.vertexCount();
+    std::vector<std::vector<int>> blocks;
+    for (std::size_t k = 0; k < values.size(); ++k) {
+        if (!std::isfinite(values[k]) || values[k] < -eps || columnIndices[k] >= pool_.size())
+            return std::nullopt;
+        if (values[k] <= eps) continue;
+        auto block = pool_[columnIndices[k]].route;
+        std::sort(block.begin(), block.end());
+        if (block.empty() || std::adjacent_find(block.begin(), block.end()) != block.end())
+            return std::nullopt;
+        if (std::find(blocks.begin(), blocks.end(), block) == blocks.end())
+            blocks.push_back(std::move(block));
+    }
+    std::vector<int> coverage(n, 0);
+    for (const auto& block : blocks) {
+        for (int customer : block) {
+            if (customer < 0 || customer >= n || customer == inst_.depot) return std::nullopt;
+            if (++coverage[customer] != 1) return std::nullopt;
+        }
+    }
+    for (int i = 0; i < n; ++i)
+        if (coverage[i] != (i == inst_.depot ? 0 : 1)) return std::nullopt;
+
+    // Para cada bloco e dia, guardar a rota de menor custo disponível no PMR.
+    std::vector<std::vector<const Column*>> choices(blocks.size(), std::vector<const Column*>(n, nullptr));
+    for (std::size_t index : columnIndices) {
+        if (index >= pool_.size()) return std::nullopt;
+        const auto& column = pool_[index];
+        if (column.day < 1 || column.day >= n) return std::nullopt;
+        auto key = column.route;
+        std::sort(key.begin(), key.end());
+        const auto it = std::find(blocks.begin(), blocks.end(), key);
+        if (it == blocks.end()) continue;
+        auto& choice = choices[static_cast<std::size_t>(it - blocks.begin())][column.day];
+        if (!choice || column.cost < choice->cost) choice = &column;
+    }
+    Solution best;
+    std::vector<bool> usedDays(n, false);
+    std::vector<Column> selected;
+    std::function<void(std::size_t, double)> visit = [&](std::size_t k, double cost) {
+        if (timeIsUp() || cost >= best.cost) return;
+        if (k == blocks.size()) {
+            best.cost = cost;
+            best.columns = selected;
+            return;
+        }
+        for (int day = 1; day < n; ++day) {
+            const auto* column = choices[k][day];
+            if (!column || usedDays[day]) continue;
+            const auto evaluation = inst_.evaluateRoute(column->route, day);
+            if (!evaluation.valid || !std::isfinite(column->cost) ||
+                std::abs(column->cost - evaluation.total_cost) > eps) continue;
+            usedDays[day] = true;
+            selected.push_back(*column);
+            visit(k + 1, cost + column->cost);
+            selected.pop_back();
+            usedDays[day] = false;
+        }
+    };
+    visit(0, 0.0);
+    if (best.cost >= 1e18) return std::nullopt;
+    return best;
 }
 
 void BranchAndPrice::branch(const Node& node, int i, int j) {
-    // TODO: filho SAME:      decisions = node.decisions + {i,j,true}
-    // TODO: filho DIFFERENT: decisions = node.decisions + {i,j,false}
-    // TODO: lb dos filhos = node.lb ; depth + 1 ; pushNode(...)
+    const int n = inst_.vertexCount();
+    if (i < 0 || i >= n || j < 0 || j >= n || i == j ||
+        i == inst_.depot || j == inst_.depot) {
+        throw std::invalid_argument("Par de ramificação inválido");
+    }
+    if (next_node_id_ > std::numeric_limits<int>::max() - 2 ||
+        node.depth == std::numeric_limits<int>::max()) {
+        throw std::overflow_error("Limite de IDs ou profundidade da árvore atingido");
+    }
+
+    auto same = std::make_unique<Node>(node);
+    auto different = std::make_unique<Node>(node);
+    same->id = next_node_id_;
+    different->id = next_node_id_ + 1;
+    same->depth = different->depth = node.depth + 1;
+    same->decisions.push_back({i, j, true});
+    different->decisions.push_back({i, j, false});
+
+    // Inserir DIFFERENT primeiro para visitar SAME primeiro em DFS.
+    pushNode(std::move(different));
+    try {
+        pushNode(std::move(same));
+    } catch (...) {
+        open_.pop_back();
+        throw;
+    }
+    next_node_id_ += 2;
 }
 
 // ---------------------------------------------------------------
@@ -557,9 +833,11 @@ std::unique_ptr<Node> BranchAndPrice::selectNode() {
         this->open_.pop_back();
     }
 
-    // TODO: BEST_BOUND -> nó com menor lb
     else if (cfg_.search == SearchStrategy::BEST_BOUND) {
-        node = nullptr;
+        auto best = std::min_element(open_.begin(), open_.end(),
+            [](const auto& a, const auto& b) { return a->lb < b->lb; });
+        node = std::move(*best);
+        open_.erase(best);
     }
     return node;
 }
@@ -569,15 +847,91 @@ void BranchAndPrice::pushNode(std::unique_ptr<Node> n) {
 }
 
 void BranchAndPrice::updateGlobalLB() {
-    // TODO: min(lb) entre os nós abertos (e o nó corrente, se aplicável)
+    if (open_.empty()) {
+        global_lb_ = incumbent_.cost;
+        return;
+    }
+    double bound = incumbent_.cost;
+    for (const auto& node : open_) bound = std::min(bound, node->lb);
+    global_lb_ = std::max(0.0, bound);
 }
 
 // ---------------------------------------------------------------
 // Heurística e utilidades
 // ---------------------------------------------------------------
 void BranchAndPrice::roundingHeuristic() {
-    // TODO: MIP (x binário) com TODAS as colunas do pool_, limite cfg_.heuristic_time
-    // TODO: se melhorar, updateIncumbent()
+    const auto start = std::chrono::steady_clock::now();
+    const auto remaining = [&]() {
+        const auto now = std::chrono::steady_clock::now();
+        const double heuristicLeft = cfg_.heuristic_time - std::chrono::duration<double>(now - start).count();
+        const double totalLeft = cfg_.time_limit + cfg_.heuristic_time -
+            std::chrono::duration<double>(now - t0_).count();
+        return std::min(heuristicLeft, totalLeft);
+    };
+    if (!std::isfinite(cfg_.heuristic_time) || cfg_.heuristic_time <= 0.0) return;
+    try {
+        GRBEnv env;
+        GRBModel model(env);
+        model.set(GRB_IntAttr_ModelSense, GRB_MINIMIZE);
+        const int n = inst_.vertexCount();
+        std::vector<GRBLinExpr> coverage(n), days(n);
+        std::vector<GRBVar> variables;
+        std::vector<std::size_t> indices;
+        variables.reserve(pool_.size());
+        indices.reserve(pool_.size());
+        for (std::size_t k = 0; k < pool_.size(); ++k) {
+            if (remaining() <= 0.0) return;
+            const auto& c = pool_[k];
+            const auto evaluation = inst_.evaluateRoute(c.route, c.day);
+            if (!evaluation.valid || !std::isfinite(c.cost) ||
+                std::abs(c.cost - evaluation.total_cost) > 1e-6) continue;
+            const auto var = model.addVar(0.0, 1.0, c.cost, GRB_BINARY);
+            variables.push_back(var);
+            indices.push_back(k);
+            for (int customer : c.route) coverage[customer] += var;
+            days[c.day] += var;
+        }
+        for (int i = 0; i < n; ++i) {
+            if (remaining() <= 0.0) return;
+            if (i != inst_.depot) model.addConstr(coverage[i] == 1);
+        }
+        for (int day = 1; day < n; ++day) {
+            if (remaining() <= 0.0) return;
+            model.addConstr(days[day] <= 1);
+        }
+        if (remaining() <= 0.0) return;
+        model.set(GRB_DoubleParam_TimeLimit, remaining());
+        model.optimize();
+        if (remaining() <= 0.0 || model.get(GRB_IntAttr_SolCount) == 0) return;
+
+        Solution solution;
+        solution.cost = 0.0;
+        std::vector<int> seen(n, 0);
+        std::vector<bool> usedDays(n, false);
+        for (std::size_t k = 0; k < variables.size(); ++k) {
+            if (remaining() <= 0.0) return;
+            const double value = variables[k].get(GRB_DoubleAttr_X);
+            if (!std::isfinite(value) || (std::abs(value) > 1e-6 &&
+                std::abs(value - 1.0) > 1e-6)) return;
+            if (value <= 0.5) continue;
+            const auto& c = pool_[indices[k]];
+            const auto evaluation = inst_.evaluateRoute(c.route, c.day);
+            if (!evaluation.valid || usedDays[c.day] ||
+                std::abs(c.cost - evaluation.total_cost) > 1e-6) return;
+            usedDays[c.day] = true;
+            for (int customer : c.route) ++seen[customer];
+            solution.cost += evaluation.total_cost;
+            solution.columns.push_back(c);
+        }
+        for (int i = 0; i < n; ++i)
+            if (seen[i] != (i == inst_.depot ? 0 : 1)) return;
+        if (remaining() <= 0.0) return;
+        updateIncumbent(solution);
+    } catch (const GRBException& e) {
+        std::cerr << "Erro Gurobi no arredondamento: " << e.getMessage() << '\n';
+    } catch (const std::exception& e) {
+        std::cerr << "Erro no arredondamento: " << e.what() << '\n';
+    }
 }
 
 bool BranchAndPrice::timeIsUp() const {

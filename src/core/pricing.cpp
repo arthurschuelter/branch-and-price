@@ -339,6 +339,7 @@ PricingResult Pricer::exact(
 
     constexpr double eps = 1e-6;
     std::vector<Column> columns;
+    std::vector<std::optional<double>> dayLowerBounds(n);
     for (int day = 1; day < n; ++day) {
         GRBLinExpr objective = -dayDuals[day];
         for (int i = 0; i < n; ++i) {
@@ -355,17 +356,19 @@ PricingResult Pricer::exact(
             std::chrono::steady_clock::now() - start).count();
         const double remaining = remainingSeconds - elapsed;
         if (remaining <= 0.0) {
-            return {PricingStatus::Interrupted, std::move(columns)};
+            return {PricingStatus::Interrupted, std::move(columns), std::move(dayLowerBounds)};
         }
         model.set(GRB_DoubleParam_TimeLimit, remaining);
         model.optimize();
 
         const int status = model.get(GRB_IntAttr_Status);
         if (status == GRB_TIME_LIMIT) {
-            return {PricingStatus::Interrupted, std::move(columns)};
+            return {PricingStatus::Interrupted, std::move(columns), std::move(dayLowerBounds)};
         }
 
         if (status == GRB_INFEASIBLE) {
+            // Não existe rota admissível neste dia; zero não exige correção.
+            dayLowerBounds[day] = 0.0;
             continue;
         }
         
@@ -377,12 +380,13 @@ PricingResult Pricer::exact(
         }
 
         const double objectiveValue = model.get(GRB_DoubleAttr_ObjVal);
+        const double bound = model.get(GRB_DoubleAttr_ObjBound);
+        if (std::isfinite(bound)) dayLowerBounds[day] = bound;
         if (objectiveValue >= -eps) {
-            const double bound = model.get(GRB_DoubleAttr_ObjBound);
             if (!std::isfinite(bound) || bound < -eps) {
                 return {
                     PricingStatus::Inconclusive, 
-                    std::move(columns)
+                    std::move(columns), std::move(dayLowerBounds)
                 };
             }
             continue;
@@ -429,5 +433,5 @@ PricingResult Pricer::exact(
         }
         columns.push_back(std::move(column));
     }
-    return {PricingStatus::Completed, std::move(columns)};
+    return {PricingStatus::Completed, std::move(columns), std::move(dayLowerBounds)};
 }

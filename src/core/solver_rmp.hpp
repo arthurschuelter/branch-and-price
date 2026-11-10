@@ -13,6 +13,7 @@ public:
     explicit RMPSolver(const Instance& inst);
 
     void reset();
+    void discard() noexcept;
     void addColumn(const Column& column);
     int solveLP(double remainingSeconds);
     

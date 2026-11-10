@@ -35,6 +35,8 @@ enum class PricingStatus {
 struct PricingResult {
     PricingStatus status;
     std::vector<Column> columns;
+    // Índice zero não representa um dia; nullopt indica limite indisponível.
+    std::vector<std::optional<double>> dayLowerBounds{};
 };
 
 // Decisão de ramificação de Ryan-Foster
@@ -53,7 +55,12 @@ struct Node {
 };
 
 enum class NodeResult {
-    Unresolved,
+    TimeLimit,
+    RestrictedMasterInfeasible,
+    PricingInterrupted,
+    PricingInconclusive,
+    NoCertification,
+    DuplicateColumns,
     Infeasible,
     Converged,
     Error
@@ -116,13 +123,20 @@ private:
     void updateGlobalLB();                            // LB global = min lb dos nós abertos
 
     // --- processamento de um nó ---
-    NodeResult processNode(Node& node);
+    NodeResult processNode(Node& node, std::vector<std::size_t>& columnIndices);
     NodeResult columnGeneration(Node& node, std::vector<std::size_t>& columnIndices);
     bool columnAllowed(const Column& c, const Node& node) const;  // respeita SAME/DIFF?
+    std::optional<std::size_t> findPoolColumn(const Column& column) const;
+    std::optional<double> diagnosticLowerBound(
+        const PricingResult& result,
+        const std::vector<double>& customerDuals,
+        const std::vector<double>& dayDuals
+    ) const;
 
     // --- ramificação ---
     bool isIntegral(double eps = 1e-6) const;         // x_{R,d} todo inteiro?
-    bool selectBranchingPair(int& i, int& j) const;   // f_ij mais perto de 0.5 (EXP3)
+    bool selectBranchingPair(const std::vector<std::size_t>& columnIndices, int& i, int& j) const;
+    std::optional<Solution> assignBlocks(const std::vector<std::size_t>& columnIndices) const;
     void branch(const Node& node, int i, int j);      // cria filhos SAME e DIFFERENT
     
 
@@ -132,6 +146,7 @@ private:
     // --- utilidades ---
     bool timeIsUp() const;
     Solution buildInitialSolution() const;
+    double initialRoutingLowerBound() const;
     double reducedCost(
         const Column& column,
         const std::vector<double>& customerDuals,
@@ -146,6 +161,7 @@ private:
 
     std::vector<Column> pool_;
     std::deque<std::unique_ptr<Node>> open_;
+    int next_node_id_ = 1;
 
     Solution incumbent_;
     double global_lb_ = 0;

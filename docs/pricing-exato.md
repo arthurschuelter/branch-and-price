@@ -135,3 +135,18 @@ e tolerâncias aceitos pela implementação.
 O ciclo de geração de colunas chama a heurística e, quando necessário, o pricing
 exato. Ainda é necessário revisar tolerâncias e ampliar a validação em instâncias
 pequenas e sob interrupção. O resultado ainda não atualiza o LB nem fecha o nó.
+
+`PricingResult.dayLowerBounds` registra `ObjBound` finito por dia ótimo; dias não
+processados ou sem limite finito ficam como `nullopt`, e dias comprovadamente
+inviáveis recebem zero, pois não têm coluna admissível. Uma interrupção ou
+conclusão inconclusiva preserva os limites já obtidos, sem usá-los como LB.
+
+Quando o pricing termina sem candidatas e todos os limites estão disponíveis, o
+ciclo imprime apenas uma candidata de diagnóstico: soma dos duais de cobertura,
+mais `min(lambda[d], 0) + min(0, bound[d] - eps)` para cada dia. A ideia é
+reduzir os duais de dia para compensar possíveis custos reduzidos negativos.
+O cálculo está em `diagnosticLowerBound()`, que retorna `nullopt` quando o pricing
+não terminou sem colunas ou quando dimensões ou valores necessários são inválidos.
+O diagnóstico é impresso com precisão suficiente para distinguir valores `double`.
+O valor não é certificado: precisão de `ObjBound`, viabilidade e arredondamento
+dos duais e a margem `eps` ainda exigem revisão. Não é usado para poda ou fechamento.

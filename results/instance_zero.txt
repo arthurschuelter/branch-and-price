@@ -1,11 +1,6 @@
-# Solucao otima do exemplo oficial da Secao 8 do enunciado.
-# valor da solucao
 59
-# limitante inferior
-59
-# numero de rotas (dias)
+28
 3
-# rotas por dia, clientes na ordem de visita
 1 3
 5 6
 2 4
