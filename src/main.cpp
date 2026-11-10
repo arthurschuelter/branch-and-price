@@ -22,6 +22,7 @@ struct Params {
 Params parseArgs(int argc, char** argv);
 
 int main(int argc, char** argv) {
+    const auto start = std::chrono::steady_clock::now();
     Params p = parseArgs(argc, argv);
     Instance instance;
 
@@ -51,7 +52,7 @@ int main(int argc, char** argv) {
     
     // TODO: flags extras para as demais ablações.
     BranchAndPrice bp(instance, cfg);
-    Solution sol = bp.solve();
+    Solution sol = bp.solve(start);
 
     std::sort(sol.columns.begin(), sol.columns.end(),
               [](const Column& a, const Column& b) { return a.day < b.day; });

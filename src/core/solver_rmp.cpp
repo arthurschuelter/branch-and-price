@@ -1,9 +1,10 @@
 #include "solver_rmp.hpp"
 #include "branch_and_price.hpp"
+#include <algorithm>
 #include <vector>
 
 
-RMPSolver::RMPSolver(const Instance& inst) : inst_(inst) { reset(); }
+RMPSolver::RMPSolver(const Instance& inst) : inst_(inst) {}
 
 void RMPSolver::discard() noexcept {
     vars_.clear();
@@ -12,7 +13,8 @@ void RMPSolver::discard() noexcept {
     model_.reset();
 }
 
-void RMPSolver::reset() {
+bool RMPSolver::reset(const std::function<bool()>& expired) {
+    if (expired()) { discard(); return false; }
     this->vars_.clear();
     this->coverage_.clear();
     this->days_.clear();
@@ -24,6 +26,7 @@ void RMPSolver::reset() {
     this->days_.resize(inst_.vertexCount());
 
     for (int v = 0; v < this->inst_.vertexCount(); ++v) {
+        if (expired()) { discard(); return false; }
         if (v == this->inst_.depot) { continue; }
 
         this->coverage_[v] = model_->addConstr(GRBLinExpr(0) == 1);
@@ -31,14 +34,22 @@ void RMPSolver::reset() {
 
 
     for (int d = 1; d < this->inst_.vertexCount(); ++d) {
+        if (expired()) { discard(); return false; }
         this->days_[d] = this->model_->addConstr(GRBLinExpr(0) <= 1);
     }
 
     this->model_->update();
+    if (expired()) { discard(); return false; }
+    return true;
 }
 
 void RMPSolver::addColumn(const Column& column) {
-    vars_.reserve(vars_.size() + 1);
+    if (vars_.size() == vars_.capacity()) {
+        if (vars_.size() == vars_.max_size()) throw std::length_error("Limite de colunas do PMR atingido");
+        const auto capacity = vars_.size() > vars_.max_size() / 2
+            ? vars_.max_size() : std::max<std::size_t>(1, vars_.size() * 2);
+        vars_.reserve(capacity);
+    }
     GRBColumn coefficients;
 
     for (int v = 0; v < this->inst_.vertexCount(); ++v) {
@@ -73,30 +84,33 @@ int RMPSolver::solveLP(double remainingSeconds) {
 
 double RMPSolver::objective() const { return this->model_->get(GRB_DoubleAttr_ObjVal); }
 
-std::vector<double> RMPSolver::values() const {
+std::vector<double> RMPSolver::values(const std::function<bool()>& expired) const {
     std::vector<double> values = std::vector<double>();
 
     for (const auto& var : this->vars_) {
+        if (expired && expired()) throw RmpTimeLimit{};
         values.push_back(var.get(GRB_DoubleAttr_X));
     }
     
     return values;
 }
 
-std::vector<double> RMPSolver::customerDuals() const {
+std::vector<double> RMPSolver::customerDuals(const std::function<bool()>& expired) const {
     std::vector<double> duals = std::vector<double>(this->inst_.vertexCount(), 0);
 
     for (int v = 0; v < this->inst_.vertexCount(); ++v) {
+        if (expired && expired()) throw RmpTimeLimit{};
         if (v == this->inst_.depot) { continue; }
         duals[v] = this->coverage_[v].get(GRB_DoubleAttr_Pi);
     }
     return duals;
 }
 
-std::vector<double> RMPSolver::dayDuals() const {
+std::vector<double> RMPSolver::dayDuals(const std::function<bool()>& expired) const {
     std::vector<double> duals = std::vector<double>(this->inst_.vertexCount(), 0);
     
     for (int d = 1; d < this->inst_.vertexCount(); ++d) {
+        if (expired && expired()) throw RmpTimeLimit{};
         duals[d] = days_[d].get(GRB_DoubleAttr_Pi);
     }
     

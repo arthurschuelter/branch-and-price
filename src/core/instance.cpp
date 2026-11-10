@@ -40,7 +40,7 @@ Instance Instance::read(const std::string& path, int depot, int capacity) {
     }
     ++cursor;
     if (n_vertices < 2) throw std::runtime_error("A instância precisa ter depósito e ao menos um cliente.");
-    const long long number_of_pairs = n_vertices * (n_vertices - 1) / 2;
+    const long long number_of_pairs = static_cast<long long>(n_vertices) * (n_vertices - 1) / 2;
     if (n_conflicts < 0 || n_conflicts > number_of_pairs) {
         throw std::runtime_error("Número de conflitos inválido no cabeçalho.");
     }

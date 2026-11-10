@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -18,10 +19,10 @@ struct Vertex {
 
 struct RouteEvaluation {
     bool valid = false;
-    int load = 0;
-    int logistics_cost = 0;
-    int priority_cost = 0;
-    int total_cost = 0;
+    std::int64_t load = 0;
+    std::int64_t logistics_cost = 0;
+    std::int64_t priority_cost = 0;
+    std::int64_t total_cost = 0;
 
     void printResult() const;
 };

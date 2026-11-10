@@ -22,4 +22,6 @@ public:
 
 private:
     const Instance& inst_;
+    // Criado na primeira chamada exata e reutilizado nas chamadas seguintes.
+    mutable std::unique_ptr<GRBEnv> env_;
 };

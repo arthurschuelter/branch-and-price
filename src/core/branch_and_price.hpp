@@ -39,6 +39,11 @@ struct PricingResult {
     std::vector<std::optional<double>> dayLowerBounds{};
 };
 
+struct EnumeratedCertificate {
+    double integerLowerBound;
+    bool lpConverged;
+};
+
 // Decisão de ramificação de Ryan-Foster
 struct BranchDecision {
     int i, j;
@@ -104,7 +109,7 @@ class BranchAndPrice {
 public:
     BranchAndPrice(const Instance& inst, const Config& cfg);
     ~BranchAndPrice();
-    Solution solve();
+    Solution solve(std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now());
 
     double lowerBound() const { return global_lb_; }
     const Stats& stats() const { return stats_; }
@@ -131,6 +136,10 @@ private:
         const PricingResult& result,
         const std::vector<double>& customerDuals,
         const std::vector<double>& dayDuals
+    ) const;
+    std::optional<EnumeratedCertificate> enumerateCertificate(
+        const Node& node, const std::vector<double>& customerDuals,
+        const std::vector<std::size_t>& columnIndices
     ) const;
 
     // --- ramificação ---

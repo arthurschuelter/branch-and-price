@@ -199,6 +199,10 @@ PricingResult Pricer::exact(
     }
 
     const auto start = std::chrono::steady_clock::now();
+    const auto expired = [&]() {
+        return std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - start).count() >= remainingSeconds;
+    };
     const int n = inst_.vertexCount();
     const int depot = inst_.depot;
     if (customerDuals.size() != static_cast<std::size_t>(n) ||
@@ -211,14 +215,15 @@ PricingResult Pricer::exact(
         }
     }
 
-    GRBEnv env;
-    GRBModel model(env);
+    if (!env_) env_ = std::make_unique<GRBEnv>();
+    GRBModel model(*env_);
     model.set(GRB_DoubleParam_MIPGap, 0.0);
     model.set(GRB_DoubleParam_MIPGapAbs, 0.0);
 
     // y[i] = se o cliente i pertence à rota.
     std::vector<GRBVar> y(n);
     for (int i = 0; i < n; ++i) {
+        if (expired()) return {PricingStatus::Interrupted, {}};
         if (i == depot) {
             continue;
         }
@@ -228,6 +233,7 @@ PricingResult Pricer::exact(
     // x[i][j] = se a rota percorre o arco i -> j.
     std::vector<std::vector<GRBVar>> x(n, std::vector<GRBVar>(n));
     for (int i = 0; i < n; ++i) {
+        if (expired()) return {PricingStatus::Interrupted, {}};
         for (int j = 0; j < n; ++j) {
             if (i == j) {
                 continue;
@@ -238,6 +244,7 @@ PricingResult Pricer::exact(
 
     std::vector<std::vector<GRBVar>> flow(n, std::vector<GRBVar>(n));
     for (int i = 0; i < n; ++i) {
+        if (expired()) return {PricingStatus::Interrupted, {}};
         for (int j = 0; j < n; ++j) {
             if (i == j) {
                 continue;
@@ -247,6 +254,7 @@ PricingResult Pricer::exact(
     }
 
     for (int i = 0; i < n; ++i) {
+        if (expired()) return {PricingStatus::Interrupted, {}};
         for (int j = 0; j < n; ++j) {
             if (i == j) {
                 continue;
@@ -256,6 +264,7 @@ PricingResult Pricer::exact(
     }
 
     for (int i = 0; i < n; ++i) {
+        if (expired()) return {PricingStatus::Interrupted, {}};
         if (i == depot) {
             continue;
         }
@@ -273,6 +282,7 @@ PricingResult Pricer::exact(
     }
 
     for (int i = 0; i < n; ++i) {
+        if (expired()) return {PricingStatus::Interrupted, {}};
         if (i == depot) {
             continue;
         }
@@ -314,6 +324,7 @@ PricingResult Pricer::exact(
     model.addConstr(load <= inst_.capacity);
 
     for (const auto& conflict : inst_.conflicts) {
+        if (expired()) return {PricingStatus::Interrupted, {}};
         const int i = conflict.first;
         const int j = conflict.second;
         if (i == depot || j == depot) {
@@ -323,6 +334,7 @@ PricingResult Pricer::exact(
     }
 
     for (const auto& decision : decisions) {
+        if (expired()) return {PricingStatus::Interrupted, {}};
         const int i = decision.i;
         const int j = decision.j;
         if (i < 0 || i >= n || j < 0 || j >= n ||
@@ -341,8 +353,10 @@ PricingResult Pricer::exact(
     std::vector<Column> columns;
     std::vector<std::optional<double>> dayLowerBounds(n);
     for (int day = 1; day < n; ++day) {
+        if (expired()) return {PricingStatus::Interrupted, std::move(columns), std::move(dayLowerBounds)};
         GRBLinExpr objective = -dayDuals[day];
         for (int i = 0; i < n; ++i) {
+            if (expired()) return {PricingStatus::Interrupted, std::move(columns), std::move(dayLowerBounds)};
             if (i != depot) {
                 objective += (inst_.vertices[i].priorities[day - 1] -
                               customerDuals[i]) * y[i];
@@ -397,6 +411,7 @@ PricingResult Pricer::exact(
         column.has.assign(n, false);
         int current = depot;
         for (int steps = 0; steps < n; ++steps) {
+            if (expired()) return {PricingStatus::Interrupted, std::move(columns), std::move(dayLowerBounds)};
             int next = -1;
             for (int j = 0; j < n; ++j) {
                 if (j != current && x[current][j].get(GRB_DoubleAttr_X) > 0.5) {
@@ -412,6 +427,7 @@ PricingResult Pricer::exact(
             current = next;
         }
         for (int i = 0; i < n; ++i) {
+            if (expired()) return {PricingStatus::Interrupted, std::move(columns), std::move(dayLowerBounds)};
             if (i != depot && (y[i].get(GRB_DoubleAttr_X) > 0.5) != column.has[i]) {
                 return {PricingStatus::Error, {}};
             }

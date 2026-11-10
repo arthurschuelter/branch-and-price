@@ -35,7 +35,10 @@ zero existem nos vetores, mas não são usadas no objetivo.
 
 ## 3. Variáveis do modelo
 
-A função cria um ambiente e um modelo Gurobi com as seguintes variáveis:
+O `Pricer` cria o ambiente Gurobi na primeira chamada exata e o reutiliza nas
+chamadas seguintes. Cada chamada monta um novo modelo, com as decisões do nó
+atual; dentro da chamada, o modelo é reutilizado para resolver cada dia. Isso
+evita carregar restrições de um nó para outro. O modelo possui estas variáveis:
 
 | Variável | Tipo | Significado |
 | --- | --- | --- |
@@ -134,7 +137,9 @@ e tolerâncias aceitos pela implementação.
 
 O ciclo de geração de colunas chama a heurística e, quando necessário, o pricing
 exato. Ainda é necessário revisar tolerâncias e ampliar a validação em instâncias
-pequenas e sob interrupção. O resultado ainda não atualiza o LB nem fecha o nó.
+pequenas e sob interrupção. Os limites `ObjBound` não atualizam o LB nem fecham
+o nó. A enumeração independente descrita na seção 9 pode fazê-lo em instâncias
+pequenas, quando suas condições são satisfeitas.
 
 `PricingResult.dayLowerBounds` registra `ObjBound` finito por dia ótimo; dias não
 processados ou sem limite finito ficam como `nullopt`, e dias comprovadamente
@@ -150,3 +155,94 @@ não terminou sem colunas ou quando dimensões ou valores necessários são inv�
 O diagnóstico é impresso com precisão suficiente para distinguir valores `double`.
 O valor não é certificado: precisão de `ObjBound`, viabilidade e arredondamento
 dos duais e a margem `eps` ainda exigem revisão. Não é usado para poda ou fechamento.
+
+## 9. Limite inteiro por enumeração independente
+
+Após o pricing exato terminar sem candidatas, para instâncias com até oito
+clientes, `enumerateCertificate()` percorre todas as sequências viáveis,
+respeitando capacidade, conflitos e decisões do nó. Para cada dia, calcula o
+menor custo reduzido usando duais de cobertura quantizados em múltiplos de
+`1/1024`, com aritmética inteira. Os duais são limitados antes da quantização;
+isso é permitido porque não precisam ser ótimos para construir uma cota dual.
+
+Para cada dia, o dual de dia escolhido é o menor entre zero e o menor custo
+reduzido enumerado com dual de dia zero. Assim, todas as colunas admissíveis
+obedecem às restrições duais. A soma desses duais fornece uma cota para o LP;
+como o objetivo inteiro de roteamento é inteiro, o teto dessa soma racional é
+um LB válido para o problema inteiro. O teto é calculado em aritmética inteira.
+
+Se a enumeração for interrompida, houver mais de oito clientes ou as entradas
+necessárias forem inválidas, ela não retorna cota nova. O LB herdado é mantido.
+O procedimento também tenta reconstruir uma solução primal racional do PMR com
+denominador 1024: ela deve respeitar exatamente cobertura e dias, ter custos e
+colunas válidos e estar próxima dos valores obtidos no PMR. Se o objetivo dessa
+solução for exatamente igual, em aritmética inteira, ao objetivo dual construído
+pela enumeração de todas as rotas, a igualdade primal-dual certifica o ótimo do
+LP completo. Só nesse caso o nó retorna `Converged` e pode ser ramificado.
+
+Se não for possível reconstruir a solução ou demonstrar a igualdade, a cota
+inteira ainda pode podar o nó quando atinge a incumbente; caso contrário, o nó
+fica aberto. Essa certificação é limitada a oito clientes e à possibilidade de
+representar a solução primal e o dual ótimos com a escala escolhida. Não usa a
+candidata numérica baseada em `ObjBound` para certificar o LP.
+
+### Fundamentação e limites da revisão
+
+Para cada dia, seja `m[d]` o mínimo entre zero e os custos reduzidos de
+**todas** as rotas admissíveis, calculados com os duais de cliente quantizados
+e dual de dia zero. Então `m[d] <= 0` e, para cada rota, a soma de seus duais
+de cliente mais `m[d]` não excede seu custo. Os duais construídos são, portanto,
+viáveis para o mestre completo. Sua soma é um LB do LP; como os custos são
+inteiros, seu teto exato é um LB do problema inteiro. A igualdade exata com
+uma solução primal viável prova também a convergência do LP. Interromper a
+enumeração impede usar o mínimo parcial, que pode ser maior que o verdadeiro.
+
+Essa justificativa depende de enumerar corretamente as rotas e de aritmética
+sem transbordamento. O limite de oito clientes e os dados inteiros de entrada
+limitam as somas usadas pela enumeração; o código rejeita transbordamento na
+soma primal. A revisão é por inspeção e não substitui comparação independente
+em instâncias variadas, sobretudo com decisões de ramificação e interrupções.
+
+Para instâncias gerais, a mesma construção dual seria válida se cada limite
+por dia fosse uma cota inferior matematicamente garantida do custo reduzido e
+as operações fossem arredondadas para baixo. O `ObjBound` e a margem fixa
+atualmente adotada não demonstram, por si, essa garantia para todas as escalas
+e tolerâncias do solver. Até fundamentar esses erros e a conversão dos dados,
+a candidata continua restrita ao diagnóstico; não prova convergência nem LB.
+
+## 10. Comparação manual com enumeração independente
+
+Nesta sessão, uma chamada direta ao `Pricer::exact()` foi comparada com um
+enumerador temporário separado, que percorreu permutações de todos os subconjuntos
+não vazios e calculou custos e restrições a partir dos dados abaixo. Ambos foram
+executados localmente com Gurobi 13.0.2; nenhum teste automatizado foi adicionado
+ao projeto. O depósito foi 2, pesos dos clientes 1, capacidade 4, sem conflitos
+salvo indicação na tabela. Cada cliente tem prioridades `(0,1,2,3)`, os duais
+de clientes são `(8,8,0,8,0)` nas posições 0 a 4 e os duais de dia são zero.
+A matriz simétrica de custos, nas mesmas posições, é:
+
+```
+0  0 10  0 15
+0  0 10  0 10
+10 10 0 10  1
+0  0 10  0 10
+15 10 1 10  0
+```
+
+| Caso | Decisões ou alteração | Mínimos enumerados por dia | ObjBound observado por dia | Rotas melhorantes retornadas |
+|---|---|---|---|---|
+| Base | Nenhuma | `-4, -1, 2, 5` | `-4, -1, 2, 5` | Dias 1 e 2: `(1,3,0)`, custos reduzidos `-4` e `-1` |
+| Conflito | `(0,3)` | `2, 3, 4, 5` | `2, 3, 4, 5` | Nenhuma |
+| SAME | `(0,4)` | `-3, 1, 5, 9` | `-3, 1, 5, 9` | Dia 1: `(4,1,3,0)`, custo reduzido `-3` |
+| DIFFERENT | `(0,1)` | `2, 3, 4, 5` | `2, 3, 4, 5` | Nenhuma |
+| Capacidade | 2 | `2, 3, 4, 5` | `2, 3, 4, 5` | Nenhuma |
+
+O status observado foi `Completed` em todas as chamadas. A enumeração encontrou
+rotas possivelmente em ordem diferente para as colunas melhorantes; custos e conjuntos
+coincidem. Para mínimos não negativos, o pricing não retorna rota, logo a comparação
+foi com o `ObjBound` observado, não com uma rota reconstruída pelo pricing.
+
+O caso base também verifica uma situação propícia a subciclo: sem conexão por
+fluxo, o ciclo `2-4-2` junto do ciclo desconectado `0-1-3-0` teria custo reduzido
+`-22` no dia 1. O mínimo conectado enumerado e observado foi `-4`. A matriz é
+não métrica: `c(0,4)=15 > c(0,1)+c(1,4)=10`.
