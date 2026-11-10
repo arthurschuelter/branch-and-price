@@ -129,9 +129,13 @@ Solution BranchAndPrice::solve(std::chrono::steady_clock::time_point start) {
                 if (timeIsUp()) throw RmpTimeLimit{};
                 branch(*node, i, j);
             } else {
-                const auto solution = assignBlocks(columnIndices);
-                if (solution) updateIncumbent(*solution);
+                const auto solution = assignBlocks(*node, columnIndices);
+                if (solution) {
+                    std::cerr << "Atribuição de blocos: custo " << solution->cost << '\n';
+                    updateIncumbent(*solution);
+                }
                 if (node->lb >= incumbent_.cost) {
+                    std::cerr << "Nó fechado por LB certificado após atribuição de blocos.\n";
                     updateGlobalLB();
                     continue;
                 }
@@ -924,7 +928,7 @@ bool BranchAndPrice::selectBranchingPair(
 }
 
 std::optional<Solution> BranchAndPrice::assignBlocks(
-    const std::vector<std::size_t>& columnIndices
+    const Node& node, const std::vector<std::size_t>& columnIndices
 ) const {
     constexpr double eps = 1e-6;
     const auto values = rmp_->values([this] { return timeIsUp(); });
@@ -960,39 +964,86 @@ std::optional<Solution> BranchAndPrice::assignBlocks(
         if (timeIsUp()) throw RmpTimeLimit{};
         if (index >= pool_.size()) return std::nullopt;
         const auto& column = pool_[index];
-        if (column.day < 1 || column.day >= n) return std::nullopt;
+        if (column.day < 1 || column.day >= n ||
+            column.has.size() != static_cast<std::size_t>(n) ||
+            !columnAllowed(column, node)) return std::nullopt;
         auto key = column.route;
         std::sort(key.begin(), key.end());
         const auto it = std::find(blocks.begin(), blocks.end(), key);
         if (it == blocks.end()) continue;
+        const auto evaluation = inst_.evaluateRoute(column.route, column.day);
+        std::vector<bool> has(n, false);
+        for (int customer : column.route) {
+            if (customer < 0 || customer >= n || customer == inst_.depot || has[customer]) return std::nullopt;
+            has[customer] = true;
+        }
+        if (!evaluation.valid || has != column.has || !std::isfinite(column.cost) ||
+            column.cost != static_cast<double>(evaluation.total_cost)) return std::nullopt;
         auto& choice = choices[static_cast<std::size_t>(it - blocks.begin())][column.day];
         if (!choice || column.cost < choice->cost) choice = &column;
     }
+    // Atribuição retangular por caminhos aumentantes (método húngaro).
+    // Custos inteiros limitados evitam overflow nos potenciais e nas somas.
+    const std::size_t count = blocks.size();
+    const int daysCount = n - 1;
+    if (count == 0 || count > static_cast<std::size_t>(daysCount)) return std::nullopt;
+    constexpr std::int64_t inf = std::numeric_limits<std::int64_t>::max() / 4;
+    const std::int64_t maxCost = std::min(
+        inf / (2 * (static_cast<std::int64_t>(count) + 1)),
+        (std::int64_t{1} << 52) / static_cast<std::int64_t>(count));
+    std::vector<std::int64_t> u(count + 1, 0), v(n, 0);
+    std::vector<std::size_t> assigned(n, 0);
+    std::vector<int> previous(n, 0);
+    for (std::size_t row = 1; row <= count; ++row) {
+        if (timeIsUp()) throw RmpTimeLimit{};
+        assigned[0] = row;
+        std::vector<std::int64_t> distance(n, inf);
+        std::vector<bool> used(n, false);
+        int current = 0;
+        do {
+            if (timeIsUp()) throw RmpTimeLimit{};
+            used[current] = true;
+            const std::size_t block = assigned[current];
+            std::int64_t delta = inf;
+            int next = 0;
+            for (int day = 1; day <= daysCount; ++day) {
+                if (used[day]) continue;
+                const auto* col = choices[block - 1][day];
+                if (col) {
+                    if (col->cost < 0 || col->cost > static_cast<double>(maxCost)) return std::nullopt;
+                    const auto cost = static_cast<std::int64_t>(col->cost);
+                    const auto reduced = cost - u[block] - v[day];
+                    if (reduced < distance[day]) {
+                        distance[day] = reduced;
+                        previous[day] = current;
+                    }
+                }
+                if (distance[day] < delta) { delta = distance[day]; next = day; }
+            }
+            if (next == 0 || delta == inf) return std::nullopt;
+            for (int day = 0; day <= daysCount; ++day) {
+                if (used[day]) { u[assigned[day]] += delta; v[day] -= delta; }
+                else if (distance[day] != inf) distance[day] -= delta;
+            }
+            current = next;
+        } while (assigned[current] != 0);
+        do {
+            const int prior = previous[current];
+            assigned[current] = assigned[prior];
+            current = prior;
+        } while (current != 0);
+    }
     Solution best;
-    std::vector<bool> usedDays(n, false);
-    std::vector<Column> selected;
-    std::function<void(std::size_t, double)> visit = [&](std::size_t k, double cost) {
-        if (timeIsUp() || cost >= best.cost) return;
-        if (k == blocks.size()) {
-            best.cost = cost;
-            best.columns = selected;
-            return;
-        }
-        for (int day = 1; day < n; ++day) {
-            const auto* column = choices[k][day];
-            if (!column || usedDays[day]) continue;
-            const auto evaluation = inst_.evaluateRoute(column->route, day);
-            if (!evaluation.valid || !std::isfinite(column->cost) ||
-                std::abs(column->cost - evaluation.total_cost) > eps) continue;
-            usedDays[day] = true;
-            selected.push_back(*column);
-            visit(k + 1, cost + column->cost);
-            selected.pop_back();
-            usedDays[day] = false;
-        }
-    };
-    visit(0, 0.0);
-    if (best.cost >= 1e18) return std::nullopt;
+    best.cost = 0;
+    for (int day = 1; day <= daysCount; ++day) {
+        if (timeIsUp()) throw RmpTimeLimit{};
+        if (assigned[day] == 0) continue;
+        const Column* column = choices[assigned[day] - 1][day];
+        if (!column) return std::nullopt;
+        best.columns.push_back(*column);
+        best.cost += column->cost;
+    }
+    if (best.columns.size() != count || !std::isfinite(best.cost)) return std::nullopt;
     return best;
 }
 

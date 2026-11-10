@@ -145,7 +145,7 @@ private:
     // --- ramificação ---
     bool isIntegral(double eps = 1e-6) const;         // x_{R,d} todo inteiro?
     bool selectBranchingPair(const std::vector<std::size_t>& columnIndices, int& i, int& j) const;
-    std::optional<Solution> assignBlocks(const std::vector<std::size_t>& columnIndices) const;
+    std::optional<Solution> assignBlocks(const Node& node, const std::vector<std::size_t>& columnIndices) const;
     void branch(const Node& node, int i, int j);      // cria filhos SAME e DIFFERENT
     
 
