@@ -39,9 +39,10 @@ struct PricingResult {
     std::vector<std::optional<double>> dayLowerBounds{};
 };
 
-struct EnumeratedCertificate {
+struct RoutingCertificate {
     double integerLowerBound;
     bool lpConverged;
+    std::int64_t scale;
 };
 
 // Decisão de ramificação de Ryan-Foster
@@ -137,13 +138,16 @@ private:
         const std::vector<double>& customerDuals,
         const std::vector<double>& dayDuals
     ) const;
-    std::optional<EnumeratedCertificate> enumerateCertificate(
+    std::optional<RoutingCertificate> routingCertificate(
         const Node& node, const std::vector<double>& customerDuals,
-        const std::vector<std::size_t>& columnIndices
+        const std::vector<std::size_t>& columnIndices, bool analytical = false,
+        std::int64_t scale = 1024, std::int64_t primalScale = 0
     ) const;
+    std::optional<std::int64_t> reconstructScale(const std::vector<double>& values,
+                                                 double tolerance) const;
 
     // --- ramificação ---
-    bool isIntegral(double eps = 1e-6) const;         // x_{R,d} todo inteiro?
+    bool isIntegral() const;                          // primal racional certificado inteiro?
     bool selectBranchingPair(const std::vector<std::size_t>& columnIndices, int& i, int& j) const;
     std::optional<Solution> assignBlocks(const Node& node, const std::vector<std::size_t>& columnIndices) const;
     void branch(const Node& node, int i, int j);      // cria filhos SAME e DIFFERENT
@@ -174,6 +178,7 @@ private:
 
     Solution incumbent_;
     double global_lb_ = 0;
+    std::int64_t certified_scale_ = 1024;
 
     std::shared_ptr<RMPSolver> rmp_;
     std::shared_ptr<Pricer> pricer_;

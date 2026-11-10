@@ -5,8 +5,50 @@
 #include <sstream>
 #include <functional>
 #include <cstdint>
+#include <numeric>
 // #include "instance.hpp"
 // #include "solver_rmp.hpp"
+
+namespace {
+// Soma a*b/divisor como parte inteira e resto, sem formar o produto a*b.
+// O divisor é no máximo 2^62; todos os restos intermediários cabem em uint64_t.
+bool addScaledProduct(std::uint64_t a, std::uint64_t b, std::uint64_t divisor,
+                      std::uint64_t& whole, std::uint64_t& remainder) {
+    constexpr auto max = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    std::uint64_t quotient = 0, rest = 0;
+    const auto bWhole = b / divisor;
+    const auto bRest = b % divisor;
+    for (int bit = 63; bit >= 0; --bit) {
+        if (quotient > max / 2) return false;
+        quotient *= 2;
+        rest *= 2;
+        if (rest >= divisor) {
+            rest -= divisor;
+            if (quotient == max) return false;
+            ++quotient;
+        }
+        if ((a >> bit) & 1U) {
+            if (bWhole > max - quotient) return false;
+            quotient += bWhole;
+            rest += bRest;
+            if (rest >= divisor) {
+                rest -= divisor;
+                if (quotient == max) return false;
+                ++quotient;
+            }
+        }
+    }
+    if (quotient > max - whole) return false;
+    whole += quotient;
+    remainder += rest;
+    if (remainder >= divisor) {
+        remainder -= divisor;
+        if (whole == max) return false;
+        ++whole;
+    }
+    return true;
+}
+}
 
 BranchAndPrice::BranchAndPrice(const Instance& inst, const Config& cfg)
     : inst_(inst),
@@ -640,17 +682,50 @@ NodeResult BranchAndPrice::columnGeneration(Node& node, std::vector<std::size_t>
                 std::cerr << "Limites por dia incompletos; LB ajustado indisponível.\n";
             }
 
-            // Certificação independente para instâncias pequenas: aritmética inteira
-            // e enumeração completa das rotas admissíveis do nó.
-            const auto certificate = enumerateCertificate(node, u, columnIndices);
-            if (certificate) {
+            // Cada escala produz um dual viável independente do PMR incompleto.
+            // A segunda inclui denominadores 3, 5, 7, 9, 11 e 13.
+            using ScalePair = std::pair<std::int64_t, std::int64_t>;
+            std::vector<ScalePair> scales{{1024, 1024}, {720720, 720720}};
+            const auto certify = [&](bool analytical, const ScalePair& scalesToUse) {
+                if (timeIsUp()) throw RmpTimeLimit{};
+                const auto certificate = routingCertificate(node, u, columnIndices, analytical,
+                                                            scalesToUse.first, scalesToUse.second);
+                if (!certificate) return false;
                 node.lb = std::max(node.lb, certificate->integerLowerBound);
                 if (node.depth == 0) stats_.root_lb = node.lb;
-                std::cerr << "LB inteiro certificado por enumeração: " << node.lb << '\n';
-                if (certificate->lpConverged) {
-                    std::cerr << "Convergência do LP certificada por igualdade primal-dual exata.\n";
-                    return NodeResult::Converged;
+                std::cerr << "LB inteiro certificado por "
+                          << (analytical ? "relaxação" : "rotas") << ": " << node.lb << '\n';
+                if (!certificate->lpConverged) return false;
+                certified_scale_ = certificate->scale;
+                std::cerr << "Convergência do LP certificada por igualdade primal-dual exata, escalas "
+                          << scalesToUse.first << "/" << scalesToUse.second << ".\n";
+                return true;
+            };
+            for (auto scale : scales) {
+                if (certify(true, scale)) return NodeResult::Converged;
+                if (node.lb >= incumbent_.cost) return NodeResult::NoCertification;
+            }
+            const bool useSubsetDP = inst_.vertexCount() <= 17;
+            if (useSubsetDP)
+                for (auto scale : scales) {
+                    if (certify(false, scale)) return NodeResult::Converged;
+                    if (node.lb >= incumbent_.cost) return NodeResult::NoCertification;
                 }
+            const auto primalValues = rmp_->values([this] { return timeIsUp(); });
+            for (double tolerance : {1e-10, 1e-7}) {
+                const auto dualScale = reconstructScale(u, tolerance);
+                const auto primalScale = reconstructScale(primalValues, tolerance);
+                if (dualScale && primalScale &&
+                    std::find(scales.begin(), scales.end(), ScalePair{*dualScale, *primalScale}) == scales.end()) {
+                    scales.emplace_back(*dualScale, *primalScale);
+                    if (certify(true, scales.back())) return NodeResult::Converged;
+                    if (node.lb >= incumbent_.cost) return NodeResult::NoCertification;
+                }
+            }
+            for (auto scale : scales) {
+                if (useSubsetDP && (scale == ScalePair{1024, 1024} || scale == ScalePair{720720, 720720})) continue;
+                if (certify(false, scale)) return NodeResult::Converged;
+                if (node.lb >= incumbent_.cost) return NodeResult::NoCertification;
             }
 
             // A certificação e o fechamento ainda dependem da validação independente
@@ -672,6 +747,55 @@ NodeResult BranchAndPrice::columnGeneration(Node& node, std::vector<std::size_t>
         return NodeResult::Error;
     }
     return NodeResult::TimeLimit;
+}
+
+std::optional<std::int64_t> BranchAndPrice::reconstructScale(
+    const std::vector<double>& values, double tolerance
+) const {
+    constexpr std::int64_t limit = std::int64_t{1} << 62;
+    const auto started = std::chrono::steady_clock::now();
+    const double available = cfg_.time_limit - std::chrono::duration<double>(started - t0_).count();
+    const double budget = std::min(0.25, std::max(0.0, available * 0.1));
+    if (budget <= 0) return std::nullopt;
+    std::int64_t scale = 1;
+    for (double value : values) {
+        if (timeIsUp()) throw RmpTimeLimit{};
+        if (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() >= budget)
+            return std::nullopt;
+        if (!std::isfinite(value)) return std::nullopt;
+        // Frações contínuas encontram denominadores grandes sem varredura linear.
+        // O inteiro da parte inteira não influencia o denominador procurado.
+        const long double absolute = std::abs(static_cast<long double>(value));
+        const long double fractional = absolute - std::floor(absolute);
+        long double remainder = fractional;
+        std::int64_t p0 = 0, p1 = 1, q0 = 1, q1 = 0;
+        std::int64_t denominator = 0;
+        for (int step = 0; step < 128; ++step) {
+            if (timeIsUp()) throw RmpTimeLimit{};
+            if (std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count() >= budget)
+                return std::nullopt;
+            const long double integral = std::floor(remainder);
+            if (!std::isfinite(integral) || integral > static_cast<long double>(limit)) break;
+            const auto a = static_cast<std::int64_t>(integral);
+            if ((q1 && a > (limit - q0) / q1) ||
+                (p1 && a > (limit - p0) / p1)) break;
+            const auto p = a * p1 + p0;
+            const auto q = a * q1 + q0;
+            if (q > 0 && std::abs(fractional - static_cast<long double>(p) / q) <= tolerance) {
+                denominator = q;
+                break;
+            }
+            p0 = p1; p1 = p; q0 = q1; q1 = q;
+            const long double tail = remainder - integral;
+            if (tail == 0.0L) break;
+            remainder = 1.0L / tail;
+        }
+        if (denominator == 0) return std::nullopt;
+        const auto factor = denominator / std::gcd(scale, denominator);
+        if (scale > limit / factor) return std::nullopt;
+        scale *= factor;
+    }
+    return scale;
 }
 
 std::optional<double> BranchAndPrice::diagnosticLowerBound(
@@ -702,17 +826,21 @@ std::optional<double> BranchAndPrice::diagnosticLowerBound(
     return candidate;
 }
 
-std::optional<EnumeratedCertificate> BranchAndPrice::enumerateCertificate(
+std::optional<RoutingCertificate> BranchAndPrice::routingCertificate(
     const Node& node, const std::vector<double>& customerDuals,
-    const std::vector<std::size_t>& columnIndices
+    const std::vector<std::size_t>& columnIndices, bool analytical, std::int64_t scale,
+    std::int64_t primalScale
 ) const {
-    // Com no máximo oito clientes, todas as operações abaixo cabem em int64_t:
-    // custos de entrada são int não negativos e os duais são limitados aqui.
-    constexpr std::int64_t scale = 1024;
-    constexpr double dualCap = 1000000.0;
+    // O teto dos duais limita a soma dos piores custos reduzidos em int64_t.
     const int n = inst_.vertexCount();
-    if (n < 2 || n > 9 || customerDuals.size() != static_cast<std::size_t>(n) || timeIsUp())
+    if (primalScale == 0) primalScale = scale;
+    if (n < 2 || scale <= 0 || scale > (std::int64_t{1} << 62) ||
+        primalScale < 1 || primalScale > (std::int64_t{1} << 62) ||
+        customerDuals.size() != static_cast<std::size_t>(n) || timeIsUp())
         return std::nullopt;
+    const auto numericLimit = std::numeric_limits<std::int64_t>::max();
+    const auto maxNumerator = numericLimit / 4 / n / n;
+    const double dualCap = static_cast<double>(maxNumerator) / static_cast<double>(scale);
     for (const auto& decision : node.decisions) {
         if (decision.i < 0 || decision.i >= n || decision.j < 0 || decision.j >= n ||
             decision.i == decision.j || decision.i == inst_.depot || decision.j == inst_.depot)
@@ -724,52 +852,161 @@ std::optional<EnumeratedCertificate> BranchAndPrice::enumerateCertificate(
         if (i == inst_.depot) continue;
         if (!std::isfinite(customerDuals[i])) return std::nullopt;
         const double clipped = std::clamp(customerDuals[i], -dualCap, dualCap);
-        u[i] = static_cast<std::int64_t>(std::floor(clipped * scale));
+        u[i] = std::clamp(static_cast<std::int64_t>(std::llround(clipped * scale)),
+                          -maxNumerator, maxNumerator);
         total += u[i];
     }
 
-    std::vector<bool> selected(n, false);
-    std::vector<int> route;
-    bool interrupted = false;
-    std::function<void(int, std::int64_t, std::int64_t, std::int64_t)> visit;
-    visit = [&](int last, std::int64_t load, std::int64_t travel, std::int64_t dual) {
-        if (timeIsUp()) { interrupted = true; return; }
-        if (!route.empty()) {
+    if (analytical) {
+        std::vector<int> minOutgoing(n, std::numeric_limits<int>::max());
+        for (int i = 0; i < n; ++i) {
+            if (timeIsUp()) return std::nullopt;
+            for (int j = 0; j < n; ++j) {
+                if (i != j) minOutgoing[i] = std::min(minOutgoing[i], inst_.travel_costs[i][j]);
+            }
+        }
+        for (int day = 1; day < n; ++day) {
+            if (timeIsUp()) return std::nullopt;
+            const auto depotCost = static_cast<std::int64_t>(minOutgoing[inst_.depot]);
+            // Se não couber, zero ainda é uma cota inferior para o arco do depósito.
+            std::int64_t bound = depotCost > numericLimit / scale ? 0 : depotCost * scale;
+            for (int i = 0; i < n; ++i) {
+                if (i == inst_.depot) continue;
+                const auto cost = static_cast<std::int64_t>(minOutgoing[i]) +
+                    inst_.vertices[i].priorities[day - 1];
+                if (cost > numericLimit / scale) continue;
+                const auto scaledCost = cost * scale;
+                if (scaledCost < u[i]) bound += scaledCost - u[i];
+            }
+            minimum[day] = std::min<std::int64_t>(0, bound);
+        }
+    } else if (n > 17) {
+        // DFS iterativa evita profundidade de pilha proporcional aos clientes.
+        // Para instâncias grandes, conflitos e capacidade podem tornar a busca
+        // pequena; se não terminar no prazo, nenhum mínimo parcial é utilizado.
+        std::vector<bool> selected(n, false);
+        std::vector<int> route, next{0};
+        std::vector<std::int64_t> loads{0}, travels{0}, duals{0};
+        while (!next.empty()) {
+            if (timeIsUp()) return std::nullopt;
+            if (next.back() == n) {
+                next.pop_back();
+                if (!route.empty()) {
+                    selected[route.back()] = false;
+                    route.pop_back(); loads.pop_back(); travels.pop_back(); duals.pop_back();
+                }
+                continue;
+            }
+            const int customer = next.back()++;
+            if (customer == inst_.depot || selected[customer] ||
+                loads.back() + inst_.vertices[customer].weight > inst_.capacity) continue;
+            bool conflict = false;
+            for (int prior : route) {
+                if (inst_.areInConflict(customer, prior)) { conflict = true; break; }
+            }
+            for (const auto& decision : node.decisions) {
+                if (!decision.same && ((decision.i == customer && selected[decision.j]) ||
+                                       (decision.j == customer && selected[decision.i]))) {
+                    conflict = true; break;
+                }
+            }
+            if (conflict) continue;
+            const int previous = route.empty() ? inst_.depot : route.back();
+            const auto load = loads.back() + inst_.vertices[customer].weight;
+            const auto travel = travels.back() + inst_.travel_costs[previous][customer];
+            const auto dual = duals.back() + u[customer];
+            route.push_back(customer); selected[customer] = true;
+            loads.push_back(load); travels.push_back(travel); duals.push_back(dual);
             bool allowed = true;
             for (const auto& decision : node.decisions) {
                 if ((decision.same && selected[decision.i] != selected[decision.j]) ||
                     (!decision.same && selected[decision.i] && selected[decision.j])) {
-                    allowed = false;
-                    break;
+                    allowed = false; break;
                 }
             }
             if (allowed) {
-                const std::int64_t routeTravel = travel + inst_.travel_costs[last][inst_.depot];
+                const auto closedTravel = travel + inst_.travel_costs[customer][inst_.depot];
                 for (int day = 1; day < n; ++day) {
-                    std::int64_t cost = routeTravel;
-                    for (int customer : route) cost += inst_.vertices[customer].priorities[day - 1];
-                    minimum[day] = std::min(minimum[day], cost * scale - dual);
+                    if (timeIsUp()) return std::nullopt;
+                    std::int64_t cost = closedTravel;
+                    for (int i : route) cost += inst_.vertices[i].priorities[day - 1];
+                    if (cost > std::numeric_limits<std::int64_t>::max() / scale) continue;
+                    const auto scaledCost = cost * scale;
+                    if (scaledCost < dual) minimum[day] = std::min(minimum[day], scaledCost - dual);
                 }
             }
+            next.push_back(0);
         }
-        for (int customer = 0; customer < n && !interrupted; ++customer) {
-            if (customer == inst_.depot || selected[customer]) continue;
-            const std::int64_t nextLoad = load + inst_.vertices[customer].weight;
-            if (nextLoad > inst_.capacity) continue;
-            bool conflict = false;
-            for (int visited : route) {
-                if (inst_.areInConflict(customer, visited)) { conflict = true; break; }
+    } else {
+        // Held–Karp calcula a menor viagem para cada conjunto e último cliente.
+        // SAME é conferido apenas no conjunto completo: prefixos podem ser parciais.
+        const int m = n - 1;
+        const std::size_t subsets = std::size_t{1} << m;
+        const auto infinity = std::numeric_limits<std::int64_t>::max() / 4;
+        std::vector<int> customers, position(n, -1);
+        for (int i = 0; i < n; ++i) if (i != inst_.depot) {
+            position[i] = static_cast<int>(customers.size());
+            customers.push_back(i);
+        }
+        std::vector<std::size_t> conflicts(m, 0);
+        for (int i = 0; i < m; ++i) for (int j = 0; j < m; ++j)
+            if (i != j && inst_.areInConflict(customers[i], customers[j]))
+                conflicts[i] |= std::size_t{1} << j;
+        std::vector<std::int64_t> load(subsets, 0), dual(subsets, 0);
+        std::vector<bool> feasible(subsets, false);
+        feasible[0] = true;
+        for (std::size_t mask = 1; mask < subsets; ++mask) {
+            if ((mask & 255U) == 0 && timeIsUp()) return std::nullopt;
+            int bit = 0;
+            while ((mask & (std::size_t{1} << bit)) == 0) ++bit;
+            const auto parent = mask ^ (std::size_t{1} << bit);
+            load[mask] = load[parent] + inst_.vertices[customers[bit]].weight;
+            dual[mask] = dual[parent] + u[customers[bit]];
+            feasible[mask] = feasible[parent] && load[mask] <= inst_.capacity &&
+                             (conflicts[bit] & parent) == 0;
+        }
+        std::vector<std::int64_t> paths(subsets * m, infinity);
+        for (int i = 0; i < m; ++i) {
+            const auto mask = std::size_t{1} << i;
+            if (feasible[mask]) paths[mask * m + i] = inst_.travel_costs[inst_.depot][customers[i]];
+        }
+        for (std::size_t mask = 1; mask < subsets; ++mask) {
+            if ((mask & 63U) == 0 && timeIsUp()) return std::nullopt;
+            if (!feasible[mask]) continue;
+            std::int64_t travel = infinity;
+            for (int last = 0; last < m; ++last) {
+                const auto path = paths[mask * m + last];
+                if (path == infinity) continue;
+                travel = std::min(travel, path + inst_.travel_costs[customers[last]][inst_.depot]);
+                for (int next = 0; next < m; ++next) {
+                    const auto flag = std::size_t{1} << next;
+                    if ((mask & flag) || !feasible[mask | flag]) continue;
+                    auto& value = paths[(mask | flag) * m + next];
+                    value = std::min(value, path + inst_.travel_costs[customers[last]][customers[next]]);
+                }
             }
-            if (conflict) continue;
-            selected[customer] = true;
-            route.push_back(customer);
-            visit(customer, nextLoad, travel + inst_.travel_costs[last][customer], dual + u[customer]);
-            route.pop_back();
-            selected[customer] = false;
+            bool allowed = travel != infinity;
+            for (const auto& decision : node.decisions) {
+                const bool a = (mask & (std::size_t{1} << position[decision.i])) != 0;
+                const bool b = (mask & (std::size_t{1} << position[decision.j])) != 0;
+                if ((decision.same && a != b) || (!decision.same && a && b)) { allowed = false; break; }
+            }
+            if (!allowed) continue;
+            for (int day = 1; day < n; ++day) {
+                std::int64_t cost = travel;
+                for (int bit = 0; bit < m; ++bit)
+                    if (mask & (std::size_t{1} << bit))
+                        cost += inst_.vertices[customers[bit]].priorities[day - 1];
+                // Se o produto positivo não cabe em int64_t, ele supera todo
+                // dual possível nesta instância e não pode reduzir o mínimo zero.
+                if (cost > std::numeric_limits<std::int64_t>::max() / scale) continue;
+                const auto scaledCost = cost * scale;
+                if (scaledCost < dual[mask])
+                    minimum[day] = std::min(minimum[day], scaledCost - dual[mask]);
+            }
         }
-    };
-    visit(inst_.depot, 0, 0, 0);
-    if (interrupted || timeIsUp()) return std::nullopt;
+        if (timeIsUp()) return std::nullopt;
+    }
     for (int day = 1; day < n; ++day) total += minimum[day];
     // O objetivo inteiro permite arredondar a cota racional para cima exatamente.
     const std::int64_t integerBound = total >= 0 ? (total + scale - 1) / scale : total / scale;
@@ -779,15 +1016,15 @@ std::optional<EnumeratedCertificate> BranchAndPrice::enumerateCertificate(
     const auto values = rmp_->values([this] { return timeIsUp(); });
     if (values.size() != columnIndices.size()) primalValid = false;
     std::vector<std::int64_t> coverage(n, 0), days(n, 0);
-    std::int64_t primal = 0;
+    std::uint64_t primalWhole = 0, primalRemainder = 0;
     for (std::size_t k = 0; primalValid && k < values.size(); ++k) {
         if (timeIsUp()) return std::nullopt;
         const double value = values[k];
         if (!std::isfinite(value) || value < -1e-7 || value > 1.0 + 1e-7 ||
             columnIndices[k] >= pool_.size()) { primalValid = false; break; }
-        const auto numerator = static_cast<std::int64_t>(std::llround(value * scale));
-        if (numerator < 0 || numerator > scale ||
-            std::abs(value - static_cast<double>(numerator) / scale) > 1e-7) {
+        const auto numerator = static_cast<std::int64_t>(std::llround(value * primalScale));
+        if (numerator < 0 || numerator > primalScale ||
+            std::abs(value - static_cast<double>(numerator) / primalScale) > 1e-7) {
             primalValid = false; break;
         }
         if (numerator == 0) continue;
@@ -819,22 +1056,37 @@ std::optional<EnumeratedCertificate> BranchAndPrice::enumerateCertificate(
         routeCost += inst_.travel_costs[previous][inst_.depot];
         if (column.cost != static_cast<double>(routeCost)) { primalValid = false; break; }
         if (has != column.has) { primalValid = false; break; }
+        if (days[column.day] > primalScale - numerator) { primalValid = false; break; }
         days[column.day] += numerator;
-        if (days[column.day] > scale) { primalValid = false; break; }
         for (int customer : column.route) {
+            if (coverage[customer] > primalScale - numerator) { primalValid = false; break; }
             coverage[customer] += numerator;
-            if (coverage[customer] > scale) primalValid = false;
         }
-        const std::int64_t contribution = numerator * routeCost;
-        if (contribution < 0 || primal > std::numeric_limits<std::int64_t>::max() - contribution) {
+        if (!primalValid) break;
+        if (routeCost < 0 || !addScaledProduct(static_cast<std::uint64_t>(numerator),
+            static_cast<std::uint64_t>(routeCost), static_cast<std::uint64_t>(primalScale),
+            primalWhole, primalRemainder)) {
             primalValid = false; break;
         }
-        primal += contribution;
     }
     for (int i = 0; primalValid && i < n; ++i) {
-        if (coverage[i] != (i == inst_.depot ? 0 : scale)) primalValid = false;
+        if (coverage[i] != (i == inst_.depot ? 0 : primalScale)) primalValid = false;
     }
-    return EnumeratedCertificate{static_cast<double>(integerBound), primalValid && primal == total};
+    // A incumbente usa double. Limitar cotas positivas evita podar contra uma
+    // incumbente inteira grande arredondada para baixo acima de 2^53.
+    const auto boundedInteger = std::min(integerBound, std::int64_t{1} << 52);
+    double safeBound = static_cast<double>(boundedInteger);
+    // A conversão para double pode arredondar um inteiro grande para cima.
+    if (static_cast<std::int64_t>(safeBound) > boundedInteger)
+        safeBound = std::nextafter(safeBound, -std::numeric_limits<double>::infinity());
+    const auto dualWhole = total >= 0 ? total / scale : -1;
+    const auto dualRemainder = total >= 0 ? total % scale : 0;
+    const auto primalGcd = std::gcd(primalRemainder, static_cast<std::uint64_t>(primalScale));
+    const auto dualGcd = std::gcd(dualRemainder, scale);
+    const bool equal = primalValid && total >= 0 && primalWhole == static_cast<std::uint64_t>(dualWhole) &&
+        primalRemainder / primalGcd == static_cast<std::uint64_t>(dualRemainder / dualGcd) &&
+        static_cast<std::uint64_t>(primalScale) / primalGcd == static_cast<std::uint64_t>(scale / dualGcd);
+    return RoutingCertificate{safeBound, equal, primalScale};
 }
 
 std::optional<std::size_t> BranchAndPrice::findPoolColumn(const Column& column) const {
@@ -858,17 +1110,13 @@ bool BranchAndPrice::columnAllowed(const Column& c, const Node& node) const {
 // ---------------------------------------------------------------
 // Ramificação
 // ---------------------------------------------------------------
-bool BranchAndPrice::isIntegral(double eps) const {
+bool BranchAndPrice::isIntegral() const {
     const auto values = rmp_->values([this] { return timeIsUp(); });
-    
     for (double v: values) {
         if (timeIsUp()) throw RmpTimeLimit{};
         if (!std::isfinite(v)) { throw std::runtime_error("Valor infinito no PMR"); }
-
-        const bool nearZero = std::abs(v) <= eps;
-        const bool nearOne = std::abs(v - 1.0) <= eps;
-
-        if (!nearZero && !nearOne) { 
+        const auto numerator = std::llround(v * certified_scale_);
+        if (numerator != 0 && numerator != certified_scale_) {
             return false; 
         }
     }
@@ -879,20 +1127,19 @@ bool BranchAndPrice::isIntegral(double eps) const {
 bool BranchAndPrice::selectBranchingPair(
     const std::vector<std::size_t>& columnIndices, int& i, int& j
 ) const {
-    constexpr double eps = 1e-6;
     const auto values = rmp_->values([this] { return timeIsUp(); });
     if (values.size() != columnIndices.size()) {
         throw std::runtime_error("Mapeamento de colunas incompatível com o PMR");
     }
     const int n = inst_.vertexCount();
-    std::vector<std::vector<double>> fractions(n, std::vector<double>(n, 0.0));
+    std::vector<std::vector<std::int64_t>> fractions(n, std::vector<std::int64_t>(n, 0));
     for (std::size_t k = 0; k < values.size(); ++k) {
         if (timeIsUp()) throw RmpTimeLimit{};
-        // A certificação atual usa exatamente a solução com denominador 1024.
-        const double x = std::round(values[k] * 1024.0) / 1024.0;
-        if (!std::isfinite(x) || x < -eps || x > 1.0 + eps || columnIndices[k] >= pool_.size()) {
+        if (!std::isfinite(values[k]) || values[k] < -1e-7 || values[k] > 1.0 + 1e-7 || columnIndices[k] >= pool_.size()) {
             throw std::runtime_error("Valor ou índice de coluna inválido na ramificação");
         }
+        const auto x = std::llround(values[k] * certified_scale_);
+        if (x < 0 || x > certified_scale_) throw std::runtime_error("Valor racional inválido na ramificação");
         const auto& column = pool_[columnIndices[k]];
         if (column.has.size() != static_cast<std::size_t>(n)) {
             throw std::runtime_error("Coluna inválida na ramificação");
@@ -900,22 +1147,26 @@ bool BranchAndPrice::selectBranchingPair(
         for (int a = 0; a < n; ++a) {
             if (a == inst_.depot || !column.has[a]) continue;
             for (int b = a + 1; b < n; ++b) {
-                if (b != inst_.depot && column.has[b]) fractions[a][b] += x;
+                if (b != inst_.depot && column.has[b]) {
+                    if (fractions[a][b] > certified_scale_ - x)
+                        throw std::runtime_error("Fração de par excede a escala certificada");
+                    fractions[a][b] += x;
+                }
             }
         }
     }
     bool found = false;
-    double bestDistance = std::numeric_limits<double>::infinity();
+    std::int64_t bestDistance = std::numeric_limits<std::int64_t>::max();
     for (int a = 0; a < n; ++a) {
         if (a == inst_.depot) continue;
         for (int b = a + 1; b < n; ++b) {
             if (b == inst_.depot) continue;
-            const double fraction = fractions[a][b];
-            if (!std::isfinite(fraction) || fraction < -eps || fraction > 1.0 + eps) {
+            const auto fraction = fractions[a][b];
+            if (fraction < 0 || fraction > certified_scale_) {
                 throw std::runtime_error("Fração de par inválida no PMR");
             }
-            if (fraction <= eps || fraction >= 1.0 - eps) continue;
-            const double distance = std::abs(fraction - 0.5);
+            if (fraction == 0 || fraction == certified_scale_) continue;
+            const auto distance = std::abs(2 * fraction - certified_scale_);
             if (!found || distance < bestDistance) {
                 found = true;
                 bestDistance = distance;
@@ -939,8 +1190,7 @@ std::optional<Solution> BranchAndPrice::assignBlocks(
         if (timeIsUp()) throw RmpTimeLimit{};
         if (!std::isfinite(values[k]) || values[k] < -eps || columnIndices[k] >= pool_.size())
             return std::nullopt;
-        // A solução primal certificada usa denominador 1024.
-        if (std::llround(values[k] * 1024.0) <= 0) continue;
+        if (std::llround(values[k] * certified_scale_) <= 0) continue;
         auto block = pool_[columnIndices[k]].route;
         std::sort(block.begin(), block.end());
         if (block.empty() || std::adjacent_find(block.begin(), block.end()) != block.end())

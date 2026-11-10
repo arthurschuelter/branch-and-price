@@ -138,8 +138,8 @@ e tolerâncias aceitos pela implementação.
 O ciclo de geração de colunas chama a heurística e, quando necessário, o pricing
 exato. Ainda é necessário revisar tolerâncias e ampliar a validação em instâncias
 pequenas e sob interrupção. Os limites `ObjBound` não atualizam o LB nem fecham
-o nó. A enumeração independente descrita na seção 9 pode fazê-lo em instâncias
-pequenas, quando suas condições são satisfeitas.
+o nó. A certificação independente descrita na seção 9 pode fazê-lo quando suas
+condições são satisfeitas.
 
 `PricingResult.dayLowerBounds` registra `ObjBound` finito por dia ótimo; dias não
 processados ou sem limite finito ficam como `nullopt`, e dias comprovadamente
@@ -156,13 +156,15 @@ O diagnóstico é impresso com precisão suficiente para distinguir valores `dou
 O valor não é certificado: precisão de `ObjBound`, viabilidade e arredondamento
 dos duais e a margem `eps` ainda exigem revisão. Não é usado para poda ou fechamento.
 
-## 9. Limite inteiro por enumeração independente
+## 9. Limite inteiro por programação dinâmica independente
 
-Após o pricing exato terminar sem candidatas, para instâncias com até oito
-clientes, `enumerateCertificate()` percorre todas as sequências viáveis,
-respeitando capacidade, conflitos e decisões do nó. Para cada dia, calcula o
-menor custo reduzido usando duais de cobertura quantizados em múltiplos de
-`1/1024`, com aritmética inteira. Os duais são limitados antes da quantização;
+Após o pricing exato terminar sem candidatas, para instâncias com até 16
+clientes, `routingCertificate()` calcula a menor viagem de cada conjunto por
+programação dinâmica sobre subconjuntos. Capacidade, conflitos e decisões do nó
+são conferidos; prefixos de grupos SAME podem ser incompletos, mas conjuntos
+finais devem respeitar todas as decisões. Para cada dia, calcula o menor custo
+reduzido usando duais de cobertura quantizados na escala escolhida, com
+aritmética inteira. Os duais são limitados antes da quantização;
 isso é permitido porque não precisam ser ótimos para construir uma cota dual.
 
 Para cada dia, o dual de dia escolhido é o menor entre zero e o menor custo
@@ -171,20 +173,74 @@ obedecem às restrições duais. A soma desses duais fornece uma cota para o LP;
 como o objetivo inteiro de roteamento é inteiro, o teto dessa soma racional é
 um LB válido para o problema inteiro. O teto é calculado em aritmética inteira.
 
-Se a enumeração for interrompida, houver mais de oito clientes ou as entradas
-necessárias forem inválidas, ela não retorna cota nova. O LB herdado é mantido.
+Para mais de 16 clientes, o código utiliza busca exaustiva iterativa de rotas,
+que pode terminar rapidamente em casos restritos por capacidade ou conflitos.
+Se a programação dinâmica ou a busca forem interrompidas, ou as entradas forem
+inválidas, essa tentativa não retorna cota nova. O LB já certificado é mantido.
 O procedimento também tenta reconstruir uma solução primal racional do PMR com
-denominador 1024: ela deve respeitar exatamente cobertura e dias, ter custos e
+o denominador da escala: ela deve respeitar exatamente cobertura e dias, ter custos e
 colunas válidos e estar próxima dos valores obtidos no PMR. Se o objetivo dessa
 solução for exatamente igual, em aritmética inteira, ao objetivo dual construído
-pela enumeração de todas as rotas, a igualdade primal-dual certifica o ótimo do
+pela programação dinâmica para todas as rotas, a igualdade primal-dual certifica o ótimo do
 LP completo. Só nesse caso o nó retorna `Converged` e pode ser ramificado.
 
 Se não for possível reconstruir a solução ou demonstrar a igualdade, a cota
 inteira ainda pode podar o nó quando atinge a incumbente; caso contrário, o nó
-fica aberto. Essa certificação é limitada a oito clientes e à possibilidade de
-representar a solução primal e o dual ótimos com a escala escolhida. Não usa a
+fica aberto. A programação dinâmica é limitada a 16 clientes; a busca acima
+desse tamanho pode ser exponencial ou fatorial. Também é necessário representar
+a solução primal e o dual ótimos com a escala escolhida. Não usa a
 candidata numérica baseada em `ObjBound` para certificar o LP.
+
+O código agora tenta também a escala `720720`, que representa, entre outros,
+denominadores 3, 5, 7, 9, 11 e 13. Os duais são arredondados ao inteiro mais
+próximo na escala, após limitação; qualquer escolha de duais de cliente serve,
+pois os duais de dia são reconstruídos para torná-los viáveis. O teste de
+igualdade primal-dual continua exato. Há também uma tentativa adaptativa que
+reconstrói escalas separadas para valores primal e duais, usando frações
+contínuas com denominadores e MMC até `2^62` em cada escala, primeiro com
+tolerância de aproximação `1e-10` e depois `1e-7`. Essas tolerâncias escolhem
+candidatas; cada tentativa usa até 0,25 s e até 10% do tempo restante, e a
+prova exige viabilidade e igualdade em aritmética inteira. Os dois objetivos
+são reduzidos por MDC antes da comparação, sem multiplicar os denominadores.
+A escala primal certificada é usada para verificar integralidade e escolher o
+par Ryan–Foster por numeradores inteiros.
+Se nenhuma escala demonstrar igualdade, o nó fica aberto, salvo outra poda válida.
+
+### Relaxação geral por arcos de saída
+
+Além da busca exata por rotas, o código calcula um
+limite independente das tolerâncias do Gurobi. Seja `m_i` o menor custo de arco
+saindo do vértice `i`, e `U_i` o dual quantizado na escala inteira `S`. Para
+cada dia, calcula-se
+
+```
+q[d] = S*m_deposito + soma_i min(0, S*(m_i + prioridade_i_d) - U_i)
+L[d] = min(0, q[d])
+```
+
+Toda rota usa uma saída do depósito e uma saída de cada cliente visitado. A
+troca de cada arco por seu mínimo e a inclusão de todos os termos negativos
+produzem `q[d]` não maior que o custo reduzido de qualquer rota, mesmo quando
+se ignoram capacidade, conflitos e decisões do nó. Assim `L[d]/S` é um dual
+de dia viável e `(soma U_i + soma L[d])/S` é um LB do LP completo. Seu teto
+inteiro é um LB do problema inteiro. A cota pode ser fraca por relaxar essas
+restrições. O numerador dos duais é limitado em função de `S` e do tamanho da
+instância, com divisões sucessivas para evitar overflow no cálculo do teto.
+Produtos positivos que não cabem são ignorados quando não podem reduzir um
+mínimo; para o arco do depósito usa-se zero como cota se o produto não couber.
+A reconstrução primal acumula o objetivo como parte inteira e resto, sem
+formar o produto entre custo e escala; a parte inteira é limitada a `int64_t`.
+Uma igualdade primal-dual exata também pode certificar
+convergência; caso contrário, o limite inteiro não autoriza ramificação como
+se o LP estivesse certificado.
+
+Os duais não têm mais um teto fixo de um milhão: seu numerador é limitado pelo
+tamanho da instância para que as somas caibam em `int64_t`. O LB inteiro positivo
+é limitado a `2^52` antes de ser armazenado em `double`, embora as escalas de
+certificação possam chegar a `2^62`. Esse limite separado evita podas causadas
+pelo arredondamento de uma incumbente inteira muito grande. Isso pode enfraquecer
+a poda, mas não eleva a cota. Se a parte inteira do objetivo primal não couber
+em `int64_t`, a tentativa não declara convergência.
 
 ### Fundamentação e limites da revisão
 
@@ -198,9 +254,10 @@ uma solução primal viável prova também a convergência do LP. Interromper a
 enumeração impede usar o mínimo parcial, que pode ser maior que o verdadeiro.
 
 Essa justificativa depende de enumerar corretamente as rotas e de aritmética
-sem transbordamento. O limite de oito clientes e os dados inteiros de entrada
-limitam as somas usadas pela enumeração; o código rejeita transbordamento na
-soma primal. A revisão é por inspeção e não substitui comparação independente
+sem transbordamento. O limite de 16 clientes e os dados inteiros de entrada
+limitam as viagens na programação dinâmica; produtos de custos pela escala e
+somas primais são verificados antes de usar o resultado. A revisão é por
+inspeção e não substitui comparação independente
 em instâncias variadas, sobretudo com decisões de ramificação e interrupções.
 
 Para instâncias gerais, a mesma construção dual seria válida se cada limite
